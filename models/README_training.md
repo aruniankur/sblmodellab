@@ -185,6 +185,73 @@ stacking layers, and `batch > 1` costs more *per well* (8.4 s vs 6.6 s) while on
 reducing the number of optimizer steps — so batch is a throughput knob, not a
 memory win.
 
+## `train_small.py` — overfit one file
+
+The cheap sanity test before committing GPU-days: can the architecture fit a
+single perturbation experiment at all?
+
+```bash
+python models/train_small.py
+```
+
+```
+700 files in data_by_plate_cell_line (showing the first 25)
+    1. plate1_CVCL_0023.h5ad
+    ...
+file (number, or part of a name) [1]: CVCL_1125
+
+dataset (genes always come from the file):
+  cells         : 34262
+  genes         : 50266
+  drug wells    : 88  (>= 128 cells)
+  control wells : 2 DMSO
+  doses         : [0.05, 5.0]
+
+model shape:
+  dim (model width) [512]:
+  heads [8]:
+  layers [1]:
+  conc_dim [32]:
+  batch (wells per step) [1]:
+  epochs [10]:
+```
+
+Genes are never asked for — they come from the file. Everything else is
+overridable by flag (`--file --dim --heads --layers --conc-dim --batch --epochs`),
+so the same run can be scripted.
+
+* There is **no train/held-out split**: every drug well of the file is trained on,
+  so the curves measure optimisation and memorisation, not generalisation.
+* One **epoch** is one pass over the file's drug wells —
+  `steps_per_epoch = ceil(n_drug_wells / batch)` (88 here), reshuffled each epoch.
+* A fixed probe set (4 wells, fixed cells) is scored at the end of every epoch, so
+  epoch-to-epoch numbers are comparable.
+* Defaults chosen for fitting rather than generalising: `--dropout 0`,
+  `--lr 3e-4`, `--grad-clip 10` (clipping at 1.0 truncates most steps, measured).
+
+```
+models/runtime/model_20261124_202259/
+    info.json      config + per-epoch metrics, rewritten every epoch
+    model.pt       weights, atomically overwritten every epoch
+    log.csv        one row per step (epoch, step, loss, seconds, drugs)
+    tb/            TensorBoard for this run
+```
+
+`info.json` is written **before** training starts, so a crashed run still
+documents its configuration:
+
+```json
+{"run": "model_20261124_202259", "file": "plate6_CVCL_1125.h5ad",
+ "model": {"dim": 256, "heads": 4, "layers": 1, "params": 14848065},
+ "training": {"batch": 1, "epochs": 1, "steps_per_epoch": 88, "lr": 0.0003},
+ "epochs": [{"epoch": 1, "train_loss": 21.62, "probe_loss": 18.85,
+             "seconds": 338.0, "peak_vram_gb": 3.358}]}
+```
+
+Measured, `dim=256 / heads=4 / layers=1`, one epoch of `plate6_CVCL_1125`:
+88 steps in 5.6 min (3.43 s/step), probe loss **23.68 → 18.85**, peak 3.36 GB.
+At `dim=512` the same file runs ~8 s/step and ~6.5 GB.
+
 ## TensorBoard
 
 ```bash

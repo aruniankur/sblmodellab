@@ -42,63 +42,13 @@ import torch
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from models.cli import ask, choose_file
 from models.model import PerturbationModel, perturbation_loss
 from models.molformer_atoms import AtomEmbeddingStore
 from models.tb import TbLogger
 from models.tahoe_data import DEFAULT_ROOT, BackedFile, build_example
 
 GB = 1e9
-
-
-# --------------------------------------------------------------------------- #
-# input helpers
-# --------------------------------------------------------------------------- #
-def ask(prompt: str, default, cast=int):
-    """Prompt with a default; an empty Enter or closed stdin keeps the default."""
-    try:
-        raw = input(f"{prompt} [{default}]: ").strip()
-    except EOFError:
-        return default
-    if not raw:
-        return default
-    try:
-        return cast(raw)
-    except (TypeError, ValueError):
-        print(f"  not a valid value, keeping {default}")
-        return default
-
-
-def choose_file(root: str, value: str | None) -> str:
-    names = sorted(
-        n for n in os.listdir(root) if n.startswith("plate") and n.endswith(".h5ad")
-    )
-    if not names:
-        raise FileNotFoundError(f"no plate*.h5ad in {root}")
-
-    if value:
-        for candidate in (value, os.path.join(root, value)):
-            if os.path.exists(candidate):
-                return candidate
-        matches = [n for n in names if value in n]
-        if len(matches) == 1:
-            return os.path.join(root, matches[0])
-        if not matches:
-            raise FileNotFoundError(f"{value!r} matches no file in {root}")
-        print(f"{value!r} is ambiguous: {matches[:8]}")
-        value = None
-
-    preview = names[:20]
-    print(f"\n{len(names)} files in {root}. First {len(preview)}:")
-    for i, name in enumerate(preview, 1):
-        print(f"  {i:2d}. {name}")
-    choice = ask("\nfile (number or name)", "1", str)
-
-    if choice.isdigit():
-        index = int(choice)
-        if not 1 <= index <= len(preview):
-            raise IndexError(f"pick 1..{len(preview)} (or pass --file with a name)")
-        return os.path.join(root, preview[index - 1])
-    return choose_file(root, choice)
 
 
 # --------------------------------------------------------------------------- #

@@ -140,6 +140,13 @@ class TbLogger:
         if val_loss is not None:
             writer.add_scalar("loss/val", val_loss, epoch)
 
+    def log_scalars(self, values: dict[str, float], step: int) -> None:
+        """Several scalar tags at one step."""
+        if self.writer is None:
+            return
+        for tag, value in values.items():
+            self.writer.add_scalar(tag, value, step)
+
     def log_file(self, step: int, text: str) -> None:
         """One-off text entry, e.g. which h5ad a benchmark run is probing."""
         if self.writer is not None:

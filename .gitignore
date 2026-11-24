@@ -23,6 +23,7 @@ metadata/
 # event files, csv logs, and the MolFormer token cache (67 MB, rebuild with
 # `python models/molformer_atoms.py`)
 models/runs/
+models/runtime/
 models/cache/
 *.pt
 *.pth

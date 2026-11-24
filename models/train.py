@@ -483,7 +483,7 @@ def main(argv: list[str] | None = None) -> None:
 
     log_path = os.path.join(cfg.out, "log.csv")
     new_log = not os.path.exists(log_path)
-    log_fh = open(log_path, "a", newline="")
+    log_fh = open(log_path, "a", newline="", encoding="utf-8")
     log = csv.writer(log_fh)
     if new_log:
         log.writerow(["epoch", "step", "unit", "loss", "val_loss", "lr", "seconds", "scale"])
