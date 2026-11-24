@@ -1,0 +1,26 @@
+# Python dependencies for the Tahoe-100M per-sample UMAP embedding pipeline.
+#
+# Python 3.12 or 3.13 (developed against 3.13.17).
+# Install torch FIRST with the CUDA build for your driver, then this file:
+#
+#   pip install torch==2.15.0 --index-url https://download.pytorch.org/whl/cu134
+#   pip install -r requirements.txt
+#
+# Every machine that embeds samples should end up with the SAME versions:
+# different torch/CUDA builds change UMAP numerics slightly, which makes the
+# merged atlas slightly inhomogeneous between machines.
+
+numpy==2.5.4
+pandas==3.1.0
+pyarrow==26.0.0
+scipy==1.18.1
+anndata==0.13.4
+scanpy==1.12.5
+scikit-learn==1.9.1
+matplotlib==3.11.2
+h5py==3.16.0
+tqdm==4.70.1
+
+# Torch-based UMAP (pulls in a compatible torch; the pinned torch from the
+# command above is kept as long as the version satisfies torchdr).
+torchdr==0.5

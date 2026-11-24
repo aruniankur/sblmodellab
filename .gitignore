@@ -1,0 +1,68 @@
+# ---------------------------------------------------------------------------
+# Tahoe-100M perturbation model — training repository.
+#
+# Rule of thumb: only source code, the 3 MB drug table and the markdown docs are
+# committed. Everything the server needs beyond that is either re-generated
+# (models/cache) or copied over out-of-band (the h5ad data).
+#
+# Size reference on the dev box: data 1.0 TB, checkpoints 760 MB,
+# token cache 67 MB. None of it belongs in git.
+# ---------------------------------------------------------------------------
+
+# --- 1. data: 593 GB + 323 GB + 85 GB -------------------------------------
+data_by_plate_cell_line/
+data_by_sample_embedded/
+metadata/
+*.h5ad
+*.h5
+*.loom
+*.zarr/
+
+# --- 2. runtime artifacts --------------------------------------------------
+# checkpoints (models/runs/<name>/{last,best}.pt ~380 MB each), TensorBoard
+# event files, csv logs, and the MolFormer token cache (67 MB, rebuild with
+# `python models/molformer_atoms.py`)
+models/runs/
+models/cache/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+events.out.tfevents.*
+
+# --- 3. generated analysis output -----------------------------------------
+# the .md reports are kept (they document the gradient study); the binary and
+# machine-dumped artefacts next to them are not needed to train
+models/testing/*.png
+models/testing/*.json
+models/testing/*.txt
+models/testing/*.log
+dataset_size_comparison.png
+
+# --- 4. python / editor / OS ----------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- 5. not needed to train (left on the dev box, not shipped) -------------
+# uncomment any of these if you decide to version them
+Analysis/
+docs/
+utils/
+tests/
+logs/
+groups.json
+*.ipynb
+
+# keep the notebook the model was ported from: it is the reference implementation
+!models/modelr.ipynb

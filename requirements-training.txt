@@ -1,0 +1,24 @@
+# Dependencies for the Tahoe-100M perturbation model in models/ only.
+#
+# Install torch FIRST, matching the server's CUDA driver, e.g.:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+# then:
+#   pip install -r requirements-training.txt
+#
+# Versions listed are what the pipeline was developed and validated against
+# (torch 2.6.0+cu124, RTX A2000). Newer should be fine; these are the ones that
+# were actually run.
+
+# --- training (models/train.py, models/benchmark.py, models/tb.py) ---------
+torch>=2.6                      # install separately, CUDA build
+numpy>=2.0
+scipy>=1.13                     # CSR slicing in models/tahoe_data.py
+pandas>=2.2                     # obs table handling
+anndata>=0.10                   # backed h5ad reading
+tensorboard>=2.15               # optional at runtime: train.py --no-tb
+
+# --- building the MolFormer token cache (models/molformer_atoms.py) --------
+# only needed once, and only on the machine that builds models/cache/*.pt
+# (needs ~180 MB download + network on first run)
+transformers>=4.57
+rdkit>=2024.3                   # atom-count sanity check in the cache builder

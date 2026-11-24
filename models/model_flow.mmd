@@ -1,0 +1,87 @@
+%% Virtual-cell / perturbation model flow — mirrors models/model.py
+%% B = batch, G = num_of_genes, C = num_of_cells, Nc = num_of_chemicals,
+%% F = chem_dim, dim = model width, conc_dim = concentration bottleneck, d = dim/num_heads
+flowchart TD
+    LEGEND["<b>Shapes</b><br/>B batch · G genes · C cells · Nc chemicals · F chem_dim · dim width · conc_dim bottleneck"]
+
+    subgraph INPUTS["INPUTS — one well = one plate × drug × dose"]
+        direction LR
+        CTRL["control_cell_line<br/>vehicle expression<br/><b>[B, G, C]</b>"]
+        CHEM["chem<br/>drug features (fingerprint)<br/><b>[B, Nc, F]</b>"]
+        CONC["chem_conc<br/>dose, one scalar<br/><b>[B, 1]</b>"]
+        CMASK["chem mask<br/><b>[B, 1, 1, Nc]</b>"]
+        COORD["cell_coordi<br/>z-scored UMAP<br/><b>[B, C, 2]</b>"]
+    end
+
+    %% ---------- embeddings ----------
+    GE["gene_embedding<br/>Embedding(G, dim)"]
+    GE --> GEMB["gene_embeddings<br/><b>[B, G, dim]</b><br/>(learned, cell-independent)"]
+
+    CHEM --> CATC
+    CONC --> EXPANDC["expand to all chemicals<br/><b>[B, Nc, 1]</b>"]
+    EXPANDC --> CATC["cat([chem, chem_conc])<br/><b>[B, Nc, F+1]</b>"]
+    CATC --> CE["chem_embedding<br/>Linear(F+1, dim)"]
+    CE --> CEMB["chem_embeddings<br/><b>[B, Nc, dim]</b>"]
+
+    %% ---------- part 1: co-expression context (cosine kernel) ----------
+    CTRL --> UNITNORM["L2-normalise over cell axis<br/>x / clamp_min(norm, 1e-12)<br/>⇒ unit vectors <b>[B, G, C]</b>"]
+    UNITNORM --> SDPA0
+    GEMB --> CONE["conc_emb<br/>Linear(dim, conc_dim)"]
+    CONE --> CV["concise_gene_embeddings<br/><b>[B, G, conc_dim]</b>"]
+    CV --> SDPA0
+
+    SDPA0["SDPA(q = control_hat, k = control_hat, v = concise_emb)<br/>scale = 10, dropout_p = 0<br/>⇒ cosine kernel × 10 (symmetric,<br/>cell-order / cell-count invariant)"]
+    SDPA0 --> OUTC0["coexpression_context<br/><b>[B, G, conc_dim]</b><br/>co-expression-weighted mix of gene embeddings"]
+    OUTC0 --> CFF["conc_ffn<br/>conc_dim → 2·dim → conc_dim<br/>(no norm, no residual)"]
+    CFF --> MERGE
+    GEMB --> MERGE
+    MERGE["merger<br/>Linear(dim + conc_dim, dim)"]
+    MERGE --> CS["gene_states<br/><b>[B, G, dim]</b><br/>per-gene; identical for every cell"]
+
+    %% ---------- part 2: stacked attention ----------
+    CS --> LAYERS
+    subgraph LAYERS["ExternalPerturbAttention × num_layers"]
+        direction TB
+        Q1["q_linear(x) → split_heads<br/>q: <b>[B, H, G, d]</b>"]
+        K1["kv_linear(chem_emb) → chunk(2) → split_heads<br/>k, v: <b>[B, H, Nc, d]</b>"]
+        Q1 --> SDPA1
+        K1 --> SDPA1
+        CMASK -. "attn_mask" .-> SDPA1
+        SDPA1["SDPA — genes query chemicals<br/>attn_mask = chem mask<br/>dropout_p = dropout (train) / 0 (eval)"]
+        SDPA1 --> MH1["merge_heads"] --> FF1["chem_ffn<br/>(no norm)"] --> OUT1["chem_context<br/><b>[B, G, dim]</b>"]
+
+        OUT1 --> KQV["cat([x, chem_context]) → kqv<br/>Linear(2·dim, 3·dim) → chunk(3) = (k, q, v)"]
+        KQV --> SDPA2["SDPA — genes ↔ genes<br/>no mask<br/>dropout_p = dropout (train) / 0 (eval)"]
+        SDPA2 --> MH2["merge_heads"] --> FF2["gene_ffn<br/>(no norm)"] --> OUT2["gene_context<br/><b>[B, G, dim]</b>"]
+        OUT2 --> RES["residual → x + gene_context"]
+    end
+    LAYERS --> CS2["gene_states'<br/><b>[B, G, dim]</b>"]
+
+    %% ---------- part 3: coordinate-conditioned readout ----------
+    CS2 --> EXP1["broadcast over cells<br/><b>[B, C, G, dim]</b>"]
+    COORD --> EXP2["broadcast over genes<br/><b>[B, C, G, 2]</b>"]
+    EXP1 --> CATG
+    EXP2 --> CATG["cat along feature<br/><b>[B, C, G, dim+2]</b>"]
+    CATG --> HEAD["coordi_layer MLP<br/>dim+2 → dim//2 → dim//4 → 1<br/>(GELU between)"]
+    HEAD --> OUT["predicted_expression<br/><b>[B, C, G]</b><br/>per (cell, gene)"]
+
+    OUT --> LOSS["perturbation_loss<br/>Σ_genes (y − x)² → mean over cells → mean over batch<br/>÷ G^z  (z = scale_exponent, default 0.5)"]
+    TGT["TARGET — supplied by the training loop<br/>perturbed log1p-CPM<br/><b>[B, C, G]</b>"] -.-> LOSS
+
+    NOTE["<b>Normalisation:</b> there is no LayerNorm / BatchNorm anywhere.<br/>The only normalisation is the L2 unit-norm on control_cell_line<br/>(makes the part-1 kernel a true cosine similarity)."]
+    NOTE -.-> SDPA0
+
+    classDef input fill:#e8f0fe,stroke:#4285f4,color:#111
+    classDef op fill:#ffffff,stroke:#666,color:#111
+    classDef att fill:#f1f8e9,stroke:#7cb342,color:#111
+    classDef out fill:#fff3e0,stroke:#fb8c00,color:#111
+    classDef miss fill:#fdecea,stroke:#d93025,stroke-dasharray:5 5,color:#111
+    classDef warn fill:#fffde7,stroke:#f9a825,stroke-dasharray:4 4,color:#111
+
+    class CTRL,CHEM,CONC,CMASK,COORD input
+    class GE,GEMB,CE,CEMB,CONE,CV,MERGE,CS,CS2,EXP1,EXP2,CATG op
+    class Q1,K1,SDPA1,MH1,FF1,OUT1,KQV,SDPA2,MH2,FF2,OUT2,RES att
+    class OUT,HEAD,LOSS out
+    class TGT miss
+    class SDPA0,UNITNORM,CFF warn
+    class LEGEND,NOTE warn
