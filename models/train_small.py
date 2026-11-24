@@ -51,8 +51,77 @@ from models.molformer_atoms import AtomEmbeddingStore
 from models.tahoe_data import DEFAULT_ROOT, BackedFile, build_example
 from models.tb import TbLogger
 
+try:
+    from tqdm import tqdm as _tqdm
+
+    def progress(iterable, **kwargs):
+        return _tqdm(iterable, **kwargs)
+
+    def say(message: str) -> None:
+        _tqdm.write(message)
+
+    HAVE_TQDM = True
+except ImportError:  # keeps the script usable without tqdm installed
+    def progress(iterable, **kwargs):
+        return iterable
+
+    def say(message: str) -> None:
+        print(message)
+
+    HAVE_TQDM = False
+
 GB = 1e9
 HERE = Path(__file__).resolve().parent
+# bars only in a real terminal: redirected output (nohup, > log.txt, journald)
+# gets clean periodic lines instead of thousands of carriage returns
+USE_BARS = HAVE_TQDM and sys.stderr.isatty()
+
+
+# --------------------------------------------------------------------------- #
+# parameter / gradient grouping
+# --------------------------------------------------------------------------- #
+def group_of(name: str) -> str:
+    """Map a parameter name to the part it belongs to.
+
+    ``layers.0.kv_linear.weight``        -> ``layer0.kv_linear``
+    ``layers.0.chem_ffn.0.weight``       -> ``layer0.chem_ffn``
+    ``gene_embedding.weight``            -> ``gene_embedding``
+    """
+    if name.startswith("layers."):
+        _, index, *rest = name.split(".")
+        return f"layer{index}.{rest[0] if rest else '?'}"
+    return name.split(".")[0]
+
+
+def parameter_counts(model) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for name, parameter in model.named_parameters():
+        key = group_of(name)
+        counts[key] = counts.get(key, 0) + parameter.numel()
+    return counts
+
+
+def gradient_norms(model, order: list[str]) -> tuple[dict[str, float], float]:
+    """L2 norm per part, plus the global norm (both measured before clipping)."""
+    squared = {key: 0.0 for key in order}
+    for name, parameter in model.named_parameters():
+        if parameter.grad is None:
+            continue
+        key = group_of(name)
+        squared[key] = squared.get(key, 0.0) + float(parameter.grad.detach().pow(2).sum())
+    norms = {key: math.sqrt(value) for key, value in squared.items()}
+    total = math.sqrt(sum(value * value for value in norms.values()))
+    return norms, total
+
+
+def print_parameter_table(counts: dict[str, int], total: int) -> None:
+    print(f"\nparameters    : {total:,}   "
+          f"({total * 4 / 1e6:.1f} MB fp32, {total * 12 / 1e6:.1f} MB with AdamW state)")
+    print(f"  {'part':<28} {'params':>14} {'share':>8}")
+    print(f"  {'-'*28} {'-'*14} {'-'*8}")
+    for key, value in sorted(counts.items(), key=lambda kv: -kv[1]):
+        print(f"  {key:<28} {value:>14,} {100 * value / total:>7.1f}%")
+    print(f"  {'total':<28} {total:>14,} {100.0:>7.1f}%")
 
 
 # --------------------------------------------------------------------------- #
@@ -140,6 +209,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--readout-chunk", type=int, default=16, help="0 disables")
     parser.add_argument("--probes", type=int, default=4,
                         help="fixed wells scored at the end of every epoch")
+    parser.add_argument("--max-steps-per-epoch", type=int, default=0,
+                        help="0 = one full pass over the file's wells")
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--run-name", default=None,
@@ -189,7 +260,10 @@ def main(argv: list[str] | None = None) -> None:
     epochs = cfg.epochs if cfg.epochs is not None else ask("  epochs", 10)
 
     batch = max(1, min(batch, len(wells)))
-    steps_per_epoch = math.ceil(len(wells) / batch)
+    full_pass = math.ceil(len(wells) / batch)
+    steps_per_epoch = full_pass
+    if cfg.max_steps_per_epoch:
+        steps_per_epoch = min(steps_per_epoch, cfg.max_steps_per_epoch)
 
     # ---- model -----------------------------------------------------------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -220,16 +294,21 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     n_params = sum(p.numel() for p in model.parameters())
+    counts = parameter_counts(model)
+    group_order = list(counts)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
     )
 
-    print(f"\n  params        : {n_params / 1e6:.2f} M")
-    print(f"  head_dim      : {dim // heads}")
+    print_parameter_table(counts, n_params)
+    print(f"\n  head_dim      : {dim // heads}")
     print(f"  chem keys     : mode={cfg.chem_tokens}")
     print(f"  dropout       : {cfg.dropout}")
     print(f"  lr / clip     : {cfg.lr} / {cfg.grad_clip}")
-    print(f"  batch         : {batch} well(s)  ->  {steps_per_epoch} steps/epoch")
+    print(f"  batch         : {batch} well(s)")
+    print(f"  epoch size    : {steps_per_epoch} steps"
+          + (f"  (capped; a full pass over {len(wells)} wells is {full_pass})"
+             if steps_per_epoch != full_pass else f"  (one pass over {len(wells)} wells)"))
     print(f"  epochs        : {epochs}")
 
     # ---- run directory ---------------------------------------------------
@@ -265,6 +344,7 @@ def main(argv: list[str] | None = None) -> None:
             "conc_dim": conc_dim, "dropout": cfg.dropout,
             "chem_dim": store.dim + 1, "chem_tokens": cfg.chem_tokens,
             "params": int(n_params),
+            "parameters": {k: int(v) for k, v in counts.items()},
         },
         "training": {
             "batch": batch, "epochs": epochs, "steps_per_epoch": steps_per_epoch,
@@ -279,11 +359,19 @@ def main(argv: list[str] | None = None) -> None:
     info_path.write_text(json.dumps(info, indent=2), encoding="utf-8")
 
     print(f"\nrun           : {run_dir}")
-    print(f"  info.json, model.pt (each epoch), log.csv, tb/")
+    print(f"  info.json, model.pt (each epoch), log.csv, grad.csv, tb/")
 
     log_fh = open(log_path, "w", newline="", encoding="utf-8")
     log = csv.writer(log_fh)
     log.writerow(["epoch", "step", "global_step", "loss", "seconds", "drugs"])
+
+    grad_path = run_dir / "grad.csv"
+    grad_fh = open(grad_path, "w", newline="", encoding="utf-8")
+    grad = csv.writer(grad_fh)
+    grad.writerow(
+        ["epoch", "step", "global_step", "loss", "grad_total"]
+        + [f"grad_{key}" for key in group_order]
+    )
 
     # ---- fixed probes + start loss ---------------------------------------
     rng = np.random.default_rng(cfg.seed)
@@ -315,12 +403,21 @@ def main(argv: list[str] | None = None) -> None:
     step_times: list[float] = []
     peak_alloc = peak_res = 0.0
 
-    for epoch in range(1, epochs + 1):
+    epoch_bar = progress(
+        range(1, epochs + 1), desc="epochs", unit="ep", position=0,
+        disable=not USE_BARS,
+    )
+    for epoch in epoch_bar:
         order = rng.permutation(len(wells))
         epoch_losses = []
         epoch_start = time.time()
 
-        for step in range(1, steps_per_epoch + 1):
+        step_bar = progress(
+            range(1, steps_per_epoch + 1),
+            desc=f"  epoch {epoch}", unit="step", position=1, leave=False,
+            disable=not USE_BARS,
+        )
+        for step in step_bar:
             chosen = [wells[order[(step - 1) * batch + j]] for j in range(batch)
                       if (step - 1) * batch + j < len(wells)]
             batch_data = make_batch(backed, store, chosen, control_wells, cfg, rng, step)
@@ -334,6 +431,8 @@ def main(argv: list[str] | None = None) -> None:
             predicted = forward(batch_data, cfg)
             loss = perturbation_loss(predicted, batch_data["target"], 0.5)
             loss.backward()
+            # measured before clipping, so the numbers are not rescaled
+            norms, grad_total = gradient_norms(model, group_order)
             if cfg.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
             optimizer.step()
@@ -351,32 +450,56 @@ def main(argv: list[str] | None = None) -> None:
 
             log.writerow([epoch, step, global_step, f"{value:.6f}",
                           f"{elapsed:.3f}", "|".join(batch_data["drugs"])])
+            grad.writerow(
+                [epoch, step, global_step, f"{value:.6f}", f"{grad_total:.6e}"]
+                + [f"{norms[key]:.6e}" for key in group_order]
+            )
 
             if tb.enabled:
                 tb.log_scalars(
                     {
                         "loss/train": value,
+                        "grad/total": grad_total,
                         "perf/seconds_per_step": elapsed,
+                        **{
+                            f"grad/{key}": norms[key]
+                            for key in ("gene_embedding", "chem_embedding",
+                                        "merger", "coordi_layer")
+                            if key in norms
+                        },
                         **{k: v for k, v in TbLogger.step_vram().items()
                            if k.startswith("step_peak") or k == "total_gb"},
                     },
                     global_step,
                 )
 
-            if step % cfg.log_every == 0 or step == steps_per_epoch:
+            if USE_BARS:
                 mean_recent = float(np.mean(epoch_losses[-cfg.log_every:]))
-                left_steps = (epochs - epoch) * steps_per_epoch + (steps_per_epoch - step)
-                eta = left_steps * float(np.mean(step_times[-50:])) / 60
-                print(
-                    f"  epoch {epoch:>3}/{epochs}  step {step:>4}/{steps_per_epoch}  "
-                    f"loss {mean_recent:>8.4f}  {elapsed:>5.2f}s/it  "
-                    f"vram {peak_alloc:>5.2f}G  eta {eta:>6.1f} min",
-                    flush=True,
+                step_bar.set_postfix(
+                    {
+                        "loss": f"{mean_recent:.4f}",
+                        "s/it": f"{elapsed:.2f}",
+                        "vram": f"{peak_alloc:.2f}G",
+                        "|g|": f"{grad_total:.1e}",
+                    }
                 )
+
+            if not USE_BARS and (step % cfg.log_every == 0 or step == steps_per_epoch):
+                mean_recent = float(np.mean(epoch_losses[-cfg.log_every:]))
+                left = ((epochs - epoch) * steps_per_epoch + (steps_per_epoch - step))
+                eta = left * float(np.mean(step_times[-50:])) / 60
+                say(f"  epoch {epoch}/{epochs}  step {step}/{steps_per_epoch}  "
+                    f"loss {mean_recent:.4f}  {elapsed:.2f}s/it  "
+                    f"vram {peak_alloc:.2f}G  |g| {grad_total:.1e}  eta {eta:.1f} min")
 
         eval_loss = score(probes, cfg)
         epoch_seconds = time.time() - epoch_start
         epoch_mean = float(np.mean(epoch_losses))
+
+        if USE_BARS:
+            epoch_bar.set_postfix(
+                {"train": f"{epoch_mean:.4f}", "probe": f"{eval_loss:.4f}"}
+            )
 
         info["epochs"].append(
             {
@@ -414,13 +537,13 @@ def main(argv: list[str] | None = None) -> None:
                 epoch,
             )
 
-        print(
+        say(
             f"== epoch {epoch}/{epochs}: train {epoch_mean:.4f}  "
             f"probe {eval_loss:.4f}  {epoch_seconds/60:.1f} min  "
-            f"-> saved {weights_path.name}",
-            flush=True,
+            f"-> saved {weights_path.name}"
         )
         log_fh.flush()
+        grad_fh.flush()
 
     info["status"] = "finished"
     info["total_seconds"] = round(time.time() - t_start, 1)
@@ -433,6 +556,7 @@ def main(argv: list[str] | None = None) -> None:
     info_path.write_text(json.dumps(info, indent=2), encoding="utf-8")
 
     log_fh.close()
+    grad_fh.close()
     if tb.enabled:
         tb.close()
     backed.close()

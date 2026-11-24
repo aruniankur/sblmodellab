@@ -42,6 +42,12 @@ MolFormer token cache, checkpoints, TensorBoard events, `metadata/`,
 `data_by_sample_embedded/`, notebooks and the analysis folders. So a fresh clone
 is a few MB.
 
+`data_by_plate_cell_line/` **is** partly tracked: only its four top-level `.csv`
+bookkeeping files (`_cell_counts_*.csv`, `_coord_*.csv`, ~142 KB total) are
+committed. `pacmap_by_cell_line/` is excluded entirely (2.8 GB of `.pkl`/`.npy`/
+`.png`). The folder itself therefore exists in a fresh clone; drop the `.h5ad`
+files into it and the defaults work with no `TAHOE_DATA_ROOT`.
+
 Two server-specific notes:
 
 * **Chunk sizes are tuned for a 12 GB card.** On a big GPU raise `--readout-chunk`
@@ -220,22 +226,60 @@ Genes are never asked for — they come from the file. Everything else is
 overridable by flag (`--file --dim --heads --layers --conc-dim --batch --epochs`),
 so the same run can be scripted.
 
+Before training it prints where the parameters live:
+
+```
+parameters    : 39,747,649   (159.0 MB fp32, 477.0 MB with AdamW state)
+  part                                 params    share
+  ---------------------------- -------------- --------
+  gene_embedding                   25,736,192    64.7%
+  layer0.chem_ffn                   2,099,712     5.3%
+  layer0.gene_ffn                   2,099,712     5.3%
+  layer1.chem_ffn                   2,099,712     5.3%
+  layer1.gene_ffn                   2,099,712     5.3%
+  layer0.kqv                        1,574,400     4.0%
+  ...
+  coordi_layer                        164,865     0.4%
+  total                            39,747,649   100.0%
+```
+
+Progress uses **two tqdm bars** (outer = epochs, inner = steps, with live loss /
+s/it / VRAM / ‖g‖). Bars are only drawn when stderr is a terminal: redirected
+output (`> run.log`, `nohup`, journald) gets clean periodic lines instead of
+thousands of carriage returns.
+
 * There is **no train/held-out split**: every drug well of the file is trained on,
   so the curves measure optimisation and memorisation, not generalisation.
 * One **epoch** is one pass over the file's drug wells —
   `steps_per_epoch = ceil(n_drug_wells / batch)` (88 here), reshuffled each epoch.
+  `--max-steps-per-epoch N` shortens it for a quick look.
 * A fixed probe set (4 wells, fixed cells) is scored at the end of every epoch, so
   epoch-to-epoch numbers are comparable.
 * Defaults chosen for fitting rather than generalising: `--dropout 0`,
   `--lr 3e-4`, `--grad-clip 10` (clipping at 1.0 truncates most steps, measured).
 
 ```
-models/runtime/model_20261124_202259/
-    info.json      config + per-epoch metrics, rewritten every epoch
+models/runtime/model_20261124_210305/
+    info.json      config + parameter breakdown + per-epoch metrics
     model.pt       weights, atomically overwritten every epoch
-    log.csv        one row per step (epoch, step, loss, seconds, drugs)
+    log.csv        epoch, step, global_step, loss, seconds, drugs
+    grad.csv       epoch, step, global_step, loss, grad_total, grad_<part>...
     tb/            TensorBoard for this run
 ```
+
+`grad.csv` is the per-step gradient trace, measured **before** clipping, one
+column per module:
+
+```
+epoch,step,global_step,loss,grad_total,grad_gene_embedding,grad_chem_embedding,
+grad_layer0.kv_linear,grad_layer0.q_linear,grad_layer0.chem_ffn,grad_layer0.kqv,
+grad_layer0.gene_ffn,...,grad_conc_emb,grad_conc_ffn,grad_merger,grad_coordi_layer
+1,1,1,24.069635,3.186e+01,1.012e-02,2.142e-01,9.220e-02,...
+```
+
+The column names match the parameter table exactly, so `grad.csv` can be joined
+against `info.json["model"]["parameters"]` to see gradient per *million* parameters
+rather than raw magnitude.
 
 `info.json` is written **before** training starts, so a crashed run still
 documents its configuration:

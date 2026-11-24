@@ -1,16 +1,30 @@
 # ---------------------------------------------------------------------------
 # Tahoe-100M perturbation model — training repository.
 #
-# Rule of thumb: only source code, the 3 MB drug table and the markdown docs are
+# Rule of thumb: only source code, small metadata tables (the 3 MB drug table,
+# the .csv bookkeeping inside data_by_plate_cell_line) and the markdown docs are
 # committed. Everything the server needs beyond that is either re-generated
-# (models/cache) or copied over out-of-band (the h5ad data).
+# (models/cache) or copied over out-of-band (the h5ad grid).
 #
 # Size reference on the dev box: data 1.0 TB, checkpoints 760 MB,
 # token cache 67 MB. None of it belongs in git.
 # ---------------------------------------------------------------------------
 
 # --- 1. data: 593 GB + 323 GB + 85 GB -------------------------------------
-data_by_plate_cell_line/
+# data_by_plate_cell_line/ itself IS tracked, but only its four small .csv
+# bookkeeping files (_cell_counts_*.csv, _coord_*.csv).
+# Everything else in it -- the .h5ad grid, checkpoints, pickles -- is not.
+# The `!**/` line is required: git cannot re-include a file whose parent
+# directory is excluded, so directories must stay traversable.
+data_by_plate_cell_line/**
+!data_by_plate_cell_line/**/
+!data_by_plate_cell_line/**/*.csv
+
+# ...except pacmap_by_cell_line/, which stays out entirely (193 files, 2.8 GB:
+# 48 .pkl embeddings, 48 .npy, 48 .png, 48 .json, 1 _fit_status.csv).
+# This line comes after the negations above, and the last matching rule wins.
+data_by_plate_cell_line/pacmap_by_cell_line/
+
 data_by_sample_embedded/
 metadata/
 *.h5ad
@@ -29,6 +43,9 @@ models/cache/
 *.pth
 *.ckpt
 *.safetensors
+*.pkl
+*.npy
+*.npz
 events.out.tfevents.*
 
 # --- 3. generated analysis output -----------------------------------------
