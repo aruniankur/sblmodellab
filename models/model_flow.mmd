@@ -1,87 +1,53 @@
-%% Virtual-cell / perturbation model flow — mirrors models/model.py
-%% B = batch, G = num_of_genes, C = num_of_cells, Nc = num_of_chemicals,
-%% F = chem_dim, dim = model width, conc_dim = concentration bottleneck, d = dim/num_heads
+%% Current architectures and shared training pipeline.
+%% B: examples (currently 1 per forward); G: genes; Cin: context cells;
+%% Cout: target cells; T: real SMILES tokens; D: dim; K: conc_dim; H: heads.
 flowchart TD
-    LEGEND["<b>Shapes</b><br/>B batch · G genes · C cells · Nc chemicals · F chem_dim · dim width · conc_dim bottleneck"]
+    RUN["run.py: dependency and GPU checks<br/>new run or resume; full or control; all files or one file"]
+    RUN --> PLAN["training/data.py<br/>plates 1-12; finite-coordinate wells; consistent gene order"]
+    PLAN --> SAMPLE["Same plate and cell line<br/>256 DMSO context cells + 128 target cells<br/>cross-well and overlapping cells allowed"]
+    SAMPLE --> NORM["Raw counts → normalize each cell to 10,000 → log1p"]
+    NORM --> CTRL["DMSO context: B × G × Cin"]
+    NORM --> TARGET["Expression target: B × Cout × G<br/>full: treated cells; control: DMSO cells"]
+    SAMPLE --> COORD["Target coordinates: B × Cout × 2<br/>full: treated coordinates; control: DMSO coordinates"]
 
-    subgraph INPUTS["INPUTS — one well = one plate × drug × dose"]
-        direction LR
-        CTRL["control_cell_line<br/>vehicle expression<br/><b>[B, G, C]</b>"]
-        CHEM["chem<br/>drug features (fingerprint)<br/><b>[B, Nc, F]</b>"]
-        CONC["chem_conc<br/>dose, one scalar<br/><b>[B, 1]</b>"]
-        CMASK["chem mask<br/><b>[B, 1, 1, Nc]</b>"]
-        COORD["cell_coordi<br/>z-scored UMAP<br/><b>[B, C, 2]</b>"]
+    subgraph SHARED["Both architectures: control-derived gene context"]
+        CTRL --> UNIT["L2-normalize each gene across context cells<br/>x / clamp_min(norm, 1e-12)"]
+        GENE["Learned gene_embedding: G × D"] --> COMP["conc_emb: D → K"]
+        UNIT --> COS["Cosine SDPA<br/>Q=normalized context, K=normalized context<br/>V=compressed gene embeddings; scale=10"]
+        COMP --> COS
+        COS --> FFN["conc_ffn: K → D → K; GELU"]
+        FFN --> MERGE["Concatenate with learned gene embeddings<br/>merger: D+K → D"]
+        GENE --> MERGE
     end
 
-    %% ---------- embeddings ----------
-    GE["gene_embedding<br/>Embedding(G, dim)"]
-    GE --> GEMB["gene_embeddings<br/><b>[B, G, dim]</b><br/>(learned, cell-independent)"]
+    MERGE --> MODE{"Model type"}
+    MODE -->|full| BLOCK
+    MODE -->|control: bypass attention| STATES
 
-    CHEM --> CATC
-    CONC --> EXPANDC["expand to all chemicals<br/><b>[B, Nc, 1]</b>"]
-    EXPANDC --> CATC["cat([chem, chem_conc])<br/><b>[B, Nc, F+1]</b>"]
-    CATC --> CE["chem_embedding<br/>Linear(F+1, dim)"]
-    CE --> CEMB["chem_embeddings<br/><b>[B, Nc, dim]</b>"]
+    SMILES["Drug SMILES"] --> MOL["molformer_atoms.py: frozen MolFormer<br/>768 features per token; offline computation"]
+    MOL --> CACHE["atom_embeddings.pt<br/>all real tokens by default; special-token rows removed"]
+    CACHE --> CHEM["Append log10(dose + 0.001) to each token<br/>B × T × 769; valid-token mask"]
+    CHEM --> PROJECT["chem_embedding: 769 → D"]
 
-    %% ---------- part 1: co-expression context (cosine kernel) ----------
-    CTRL --> UNITNORM["L2-normalise over cell axis<br/>x / clamp_min(norm, 1e-12)<br/>⇒ unit vectors <b>[B, G, C]</b>"]
-    UNITNORM --> SDPA0
-    GEMB --> CONE["conc_emb<br/>Linear(dim, conc_dim)"]
-    CONE --> CV["concise_gene_embeddings<br/><b>[B, G, conc_dim]</b>"]
-    CV --> SDPA0
-
-    SDPA0["SDPA(q = control_hat, k = control_hat, v = concise_emb)<br/>scale = 10, dropout_p = 0<br/>⇒ cosine kernel × 10 (symmetric,<br/>cell-order / cell-count invariant)"]
-    SDPA0 --> OUTC0["coexpression_context<br/><b>[B, G, conc_dim]</b><br/>co-expression-weighted mix of gene embeddings"]
-    OUTC0 --> CFF["conc_ffn<br/>conc_dim → 2·dim → conc_dim<br/>(no norm, no residual)"]
-    CFF --> MERGE
-    GEMB --> MERGE
-    MERGE["merger<br/>Linear(dim + conc_dim, dim)"]
-    MERGE --> CS["gene_states<br/><b>[B, G, dim]</b><br/>per-gene; identical for every cell"]
-
-    %% ---------- part 2: stacked attention ----------
-    CS --> LAYERS
-    subgraph LAYERS["ExternalPerturbAttention × num_layers"]
-        direction TB
-        Q1["q_linear(x) → split_heads<br/>q: <b>[B, H, G, d]</b>"]
-        K1["kv_linear(chem_emb) → chunk(2) → split_heads<br/>k, v: <b>[B, H, Nc, d]</b>"]
-        Q1 --> SDPA1
-        K1 --> SDPA1
-        CMASK -. "attn_mask" .-> SDPA1
-        SDPA1["SDPA — genes query chemicals<br/>attn_mask = chem mask<br/>dropout_p = dropout (train) / 0 (eval)"]
-        SDPA1 --> MH1["merge_heads"] --> FF1["chem_ffn<br/>(no norm)"] --> OUT1["chem_context<br/><b>[B, G, dim]</b>"]
-
-        OUT1 --> KQV["cat([x, chem_context]) → kqv<br/>Linear(2·dim, 3·dim) → chunk(3) = (k, q, v)"]
-        KQV --> SDPA2["SDPA — genes ↔ genes<br/>no mask<br/>dropout_p = dropout (train) / 0 (eval)"]
-        SDPA2 --> MH2["merge_heads"] --> FF2["gene_ffn<br/>(no norm)"] --> OUT2["gene_context<br/><b>[B, G, dim]</b>"]
-        OUT2 --> RES["residual → x + gene_context"]
+    subgraph BLOCK["Full model only: ExternalPerturbAttention × layers"]
+        PROJECT --> CROSS["Multi-head cross-attention<br/>Q=gene states; K,V=drug tokens; valid-token mask"]
+        CROSS --> CFFN["chem_ffn: D → 4D → D; GELU"]
+        CFFN --> CAT["Concatenate input gene states and chemical context"]
+        CAT --> QKV["kqv: 2D → 3D; split in K,Q,V order"]
+        QKV --> SELF["Multi-head gene self-attention<br/>H heads over G gene tokens"]
+        SELF --> GFFN["gene_ffn: D → 4D → D; GELU"]
+        GFFN --> RES["Residual: input gene states + gene context"]
     end
-    LAYERS --> CS2["gene_states'<br/><b>[B, G, dim]</b>"]
-
-    %% ---------- part 3: coordinate-conditioned readout ----------
-    CS2 --> EXP1["broadcast over cells<br/><b>[B, C, G, dim]</b>"]
-    COORD --> EXP2["broadcast over genes<br/><b>[B, C, G, 2]</b>"]
-    EXP1 --> CATG
-    EXP2 --> CATG["cat along feature<br/><b>[B, C, G, dim+2]</b>"]
-    CATG --> HEAD["coordi_layer MLP<br/>dim+2 → dim//2 → dim//4 → 1<br/>(GELU between)"]
-    HEAD --> OUT["predicted_expression<br/><b>[B, C, G]</b><br/>per (cell, gene)"]
-
-    OUT --> LOSS["perturbation_loss<br/>Σ_genes (y − x)² → mean over cells → mean over batch<br/>÷ G^z  (z = scale_exponent, default 0.5)"]
-    TGT["TARGET — supplied by the training loop<br/>perturbed log1p-CPM<br/><b>[B, C, G]</b>"] -.-> LOSS
-
-    NOTE["<b>Normalisation:</b> there is no LayerNorm / BatchNorm anywhere.<br/>The only normalisation is the L2 unit-norm on control_cell_line<br/>(makes the part-1 kernel a true cosine similarity)."]
-    NOTE -.-> SDPA0
-
-    classDef input fill:#e8f0fe,stroke:#4285f4,color:#111
-    classDef op fill:#ffffff,stroke:#666,color:#111
-    classDef att fill:#f1f8e9,stroke:#7cb342,color:#111
-    classDef out fill:#fff3e0,stroke:#fb8c00,color:#111
-    classDef miss fill:#fdecea,stroke:#d93025,stroke-dasharray:5 5,color:#111
-    classDef warn fill:#fffde7,stroke:#f9a825,stroke-dasharray:4 4,color:#111
-
-    class CTRL,CHEM,CONC,CMASK,COORD input
-    class GE,GEMB,CE,CEMB,CONE,CV,MERGE,CS,CS2,EXP1,EXP2,CATG op
-    class Q1,K1,SDPA1,MH1,FF1,OUT1,KQV,SDPA2,MH2,FF2,OUT2,RES att
-    class OUT,HEAD,LOSS out
-    class TGT miss
-    class SDPA0,UNITNORM,CFF warn
-    class LEGEND,NOTE warn
+    BLOCK --> STATES["Gene states: B × G × D"]
+    STATES --> READOUT["Broadcast gene states and target coordinates<br/>Concatenate coordinates first: B × Cout × G × D+2"]
+    COORD --> READOUT
+    READOUT --> MLP["coordi_layer: D+2 → D/2 → D/4 → 1<br/>GELU between linear layers"]
+    MLP --> PRED["Predicted expression: B × Cout × G"]
+    PRED --> LOSS["Squared error: sum over genes, mean over cells and batch<br/>divide by sqrt G"]
+    TARGET --> LOSS
+    LOSS --> BACK["Backward per target well; accumulate loss divided by unit size<br/>gradient clipping → one AdamW update per unit"]
+    BACK --> LOG["log.csv: one row per backward pass<br/>loss + gradients + sample metadata + timing + peak VRAM"]
+    BACK --> SAVE["models/trained_model/model_timestamp_control or full<br/>info.json, config.json, last.pt, best.pt"]
+    CHUNK["Memory controls: query chunks for cosine SDPA<br/>readout chunks across target cells; activation recomputation"] -.-> COS
+    CHUNK -.-> READOUT
+    NOTE["Control has no chemical branch or attention stack.<br/>heads/layers/dropout do not change its computation.<br/>Target coordinates are supplied expression-derived inputs."] -.-> MODE

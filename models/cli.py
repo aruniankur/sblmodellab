@@ -1,4 +1,4 @@
-"""Small interactive helpers shared by benchmark.py / train_small.py."""
+"""File selection helpers for the launcher and training configuration."""
 
 from __future__ import annotations
 

@@ -1,9 +1,7 @@
-"""Virtual-cell / perturbation model extracted from ``modelr.ipynb``.
+"""Chemical perturbation model for coordinate-conditioned gene expression.
 
-This module is a 1:1 port of the notebook logic. The computation is unchanged:
-the same layers, the same shapes, the same ``scale=10`` cosine kernel and the
-same residual / FFN ordering. Only names, docstrings and debug ``print`` calls
-were touched.
+Combines control-derived co-expression context, chemical cross-attention,
+gene self-attention and a coordinate-conditioned expression readout.
 
 Shapes used throughout
 ----------------------

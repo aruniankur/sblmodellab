@@ -6,6 +6,8 @@ import math
 import os
 from pathlib import Path
 
+# CSV is text: limit gradient display precision without changing training tensors.
+GRADIENT_DECIMAL_PLACES = 8
 
 
 def parameter_group(name):
@@ -67,6 +69,9 @@ class PassLog:
             self.fh.flush()
 
     def write(self, values):
+        values = {key: (format(value, f".{GRADIENT_DECIMAL_PLACES}f")
+                        if key.startswith("grad_") else value)
+                  for key, value in values.items()}
         self.writer.writerow(values)
         self.fh.flush()
 

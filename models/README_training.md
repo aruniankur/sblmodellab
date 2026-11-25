@@ -123,7 +123,9 @@ allocated VRAM. No separate gradient CSV is created.
 `loss` is the unaveraged example objective; `backward_loss` is `loss / number of
 micro-batches in the unit`. Gradient columns measure that example's contribution
 before clipping, with accumulation averaging undone. Prior accumulated gradients
-are subtracted so each row describes its own backward pass. For accumulation,
+are subtracted so each row describes its own backward pass. Gradient CSV fields
+use eight digits after the decimal point (text formatting, not FP16/BF16 tensor storage); loss
+and training/checkpoint precision are unchanged. For accumulation,
 this requires a temporary copy of the preceding gradients.
 
 ## Non-interactive commands
@@ -159,7 +161,8 @@ optimizer updates per invocation; `--max-units-per-epoch` caps sampled units.
 | `training/engine.py` | Shared optimization loop and evaluation |
 | `training/metrics.py` | Module gradient metrics and one CSV writer |
 | `training/checkpoints.py` | Run naming, atomic saves, metadata, RNG restoration |
-| `benchmark.py` | Independent one-file hardware capability probe; no model saved |
+| `benchmark.py`, `training/capacity.py` | Range sweep and isolated training-capacity worker |
+| `model_flow.mmd` | Current full/control architecture and training flow |
 | `tests/test_training.py` | Synthetic-data sampling, training and resume tests |
 
 Change sampling in `training/data.py`, defaults in `training/config.py`, metrics
@@ -176,3 +179,49 @@ python -m unittest discover -s models/tests -v
 The supplied coordinates are expression-derived inputs. A reconstruction probe
 checks fitting at known coordinates; it does not demonstrate prediction at
 unknown coordinates or prove that the chemical branch is being used.
+
+## Training capacity benchmark
+
+```powershell
+python models/benchmark.py
+```
+
+Enter dimension start/end/step and layer start/end, then select a real H5AD file.
+For a scriptable sweep:
+
+```powershell
+python models/benchmark.py --file plate6_CVCL_1125.h5ad --dim-start 256 --dim-end 1024 --dim-step 256 --layers-start 1 --layers-end 4
+```
+
+Both ranges use inclusive bounds (the end is tested if aligned with the step).
+`--layers-step` defaults to 1. Heads default to 8 and the co-expression bottleneck
+to 32; use `--heads` and `--conc-dim` to change them. Shapes incompatible with
+`dim % heads == 0` or `dim / heads <= 128` are recorded as `invalid` and skipped.
+
+Each shape runs in a fresh subprocess using actual cells, all genes in the file,
+chemical tokens, the same chunk sizes and precision as training, and the full
+forward/backward/gradient-metrics/clipping/AdamW path. By default one warmup unit
+allocates optimizer state and two timed units are measured, each with up to two
+micro-batches. This measures a training unit rather than inference. Weights are
+discarded; it never saves a trained model or alters an existing run.
+
+Reports go to `models/benchmark_results/benchmark_<timestamp>/results.csv` and
+`summary.json`, updated after each completed shape. `--out` selects a new report
+folder. The report includes parameters, loss, gradients, compute time, peak
+allocated/reserved GPU memory, and a result for every pair:
+
+- `fits`: completed with the requested free-VRAM headroom (default 10%).
+- `tight`: completed but exceeds the memory budget; leave room before a long run.
+- `oom`: CUDA allocation failed.
+- `timeout`: the isolated process exceeded `--timeout` seconds (default 180),
+  including startup and data reading; this does not prove memory failure.
+- `nonfinite`, `invalid`, `error`: numerical, shape-validation or execution failure.
+- `cpu_completed`: training worked on CPU; this is not a GPU-capacity verdict.
+
+The summary reports the largest fitting tested dimension for each layer count.
+Use `--steps`, `--warmup`, `--timeout`, `--max-vram-fraction`, `--amp`,
+`--query-chunk`, `--readout-chunk` and sampling flags to match your intended run.
+A short benchmark on one file measures that workload; it is not a guarantee for
+all drug lengths, background GPU usage or a complete long training run.
+`--model control` is also supported, but layer counts have no effect there, so it
+runs one trial per dimension rather than repeating identical architectures.
