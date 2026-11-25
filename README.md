@@ -58,3 +58,10 @@ new and resumed runs, all-file or single-file training, tqdm progress, and one
 loss/gradient CSV per run. Checkpoints and metadata live under
 `models/trained_model/model_<timestamp>_{control,full}/`.
 See [models/README_training.md](models/README_training.md) for setup and code layout.
+
+## Live training dashboard
+
+The separate [UIeval dashboard](UIeval/README.md) monitors saved and active runs
+with automatic two-second refresh, loss/gradient charts, filters and run comparisons.
+Start it in a second terminal with `python UIeval/run.py` after installing its
+separate dependencies. It does not modify or control model training.

@@ -82,7 +82,11 @@ utils/
 tests/
 !models/tests/
 !models/tests/*.py
+!UIeval/tests/
+!UIeval/tests/*.py
 logs/
 groups.json
 *.ipynb
 outputs
+# Local dashboard preview fixtures
+UIeval/.preview_runs/
