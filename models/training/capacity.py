@@ -33,7 +33,7 @@ def run_trial(cfg, *, warmup=1, steps=2, max_vram_fraction=0.9):
     rng = np.random.default_rng(cfg.seed)
     result = {"dim": cfg.dim, "head_dim": cfg.head_dim, "conc_dim": cfg.conc_dim,
               "layers": cfg.layers, "heads": cfg.heads,
-              "model_type": cfg.model_type, "normalization": cfg.normalization, "gene_statistics": cfg.gene_statistics, "status": "error", "completed_steps": 0,
+              "model_type": cfg.model_type, "normalization": cfg.normalization, "gene_statistics": cfg.gene_statistics, "gene_residual": cfg.gene_residual, "status": "error", "completed_steps": 0,
               "seconds_per_unit": None, "peak_allocated_gb": 0., "peak_reserved_gb": 0.,
               "loss": None, "grad_total": None, "reason": ""}
     model = optimizer = backed = None

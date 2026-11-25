@@ -22,7 +22,9 @@ flowchart TD
         STATS --> MERGE
     end
 
-    MERGE --> MNORM["LayerNorm D after merger"]
+    MERGE --> ADD["Add learned gene embeddings: merger output + embedding"]
+    GENE --> ADD
+    ADD --> MNORM["LayerNorm D after residual addition"]
     MNORM --> MODE{"Model type"}
     MODE -->|full| BLOCK
     MODE -->|control: bypass attention| STATES
@@ -61,3 +63,5 @@ flowchart TD
 
 %% LayerNorm nodes describe new normalized runs; legacy/ablation runs bypass them.
 %% Statistics-free legacy/ablation runs omit STATS and use merger width D+K.
+
+%% Legacy checkpoints disable the gene residual; new runs enable it by default.

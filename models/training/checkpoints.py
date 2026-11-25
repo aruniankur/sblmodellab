@@ -11,7 +11,7 @@ import torch
 
 from models.training.config import TRAINED_ROOT
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def write_json(path, value):
@@ -44,7 +44,7 @@ def checkpoint_path(value):
 def load_checkpoint(value):
     path = checkpoint_path(value)
     state = torch.load(path, map_location="cpu", weights_only=False)
-    if state.get("schema_version") not in (1, 2, SCHEMA_VERSION):
+    if state.get("schema_version") not in (1, 2, 3, SCHEMA_VERSION):
         raise ValueError("This checkpoint predates the organized pipeline; start a new run")
     if state["schema_version"] == 1:
         # Older runs have no norm parameters or matching optimizer/CSV groups.
@@ -57,6 +57,11 @@ def load_checkpoint(value):
         state["config"].setdefault("gene_statistics", False)
     elif "gene_statistics" not in state["config"]:
         raise ValueError("Checkpoint is missing its gene-statistics architecture setting")
+    if state["schema_version"] < 4:
+        # Residuals change forward behavior even though no parameter keys change.
+        state["config"].setdefault("gene_residual", False)
+    elif "gene_residual" not in state["config"]:
+        raise ValueError("Checkpoint is missing its gene-residual architecture setting")
     return path.parent, state
 
 

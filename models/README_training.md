@@ -327,3 +327,7 @@ Transfer the resulting ZIP to your PC, extract it into `models/trained_model/`,
 to keep its weights and metadata together. The ZIP contains the run only; the PC
 still needs the code and any dataset/drug cache required to train. Continuing
 training also requires the saved data paths to be available on the destination.
+
+### Gene embedding residual
+
+New runs in both architectures use `LayerNorm(merger(features) + gene_embeddings)`. This adds an identity gradient path without changing parameter counts. `--no-gene-residual` disables it for controlled comparisons. Schema 1–3 checkpoints keep the residual disabled when the setting is absent; resuming preserves their saved architecture. New checkpoints use schema 4.

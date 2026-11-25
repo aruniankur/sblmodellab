@@ -200,6 +200,7 @@ class PerturbationModel(nn.Module):
 
        Five per-gene statistics of the pre-L2 log-expression input are appended
        directly at the merger, preserving expression magnitude information.
+       Add the original gene embeddings to its output before normalization.
 
     2. Chemical conditioning (part 2)
        The mixed gene states are refined by ``num_layers`` stacked
@@ -223,11 +224,13 @@ class PerturbationModel(nn.Module):
         cell_coordi_dim: int = 2,
         normalization: bool = True,
         gene_statistics: bool = True,
+        gene_residual: bool = True,
     ):
         super().__init__()
 
         self.num_genes = num_of_genes
         self.use_gene_statistics = gene_statistics
+        self.use_gene_residual = gene_residual
 
         self.gene_embedding = nn.Embedding(num_of_genes, dim)
 
@@ -328,6 +331,9 @@ class PerturbationModel(nn.Module):
             merger_inputs.append(statistics)
         gene_states = self.merger(torch.cat(merger_inputs, dim=-1))
 
+        # Identity path preserves gene identity independently of the learned fusion.
+        if self.use_gene_residual:
+            gene_states = gene_states + gene_embeddings
         gene_states = self.merger_norm(gene_states)
 
         # --- part 2: chemical-conditioned layer stack ---

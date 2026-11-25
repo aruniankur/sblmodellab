@@ -37,6 +37,7 @@ class TrainingConfig:
     dropout: float = 0.1
     normalization: str = "layernorm"
     gene_statistics: bool = True
+    gene_residual: bool = True
     scale_exponent: float = 0.5
     amp: str = "bf16"
     query_chunk: int = 4096
@@ -75,6 +76,8 @@ class TrainingConfig:
             raise ValueError("dim must be divisible by heads and dim / heads must be <= 128")
         if self.model_type == "full" and self.layers < 1:
             raise ValueError("The full model needs at least one perturbation layer")
+        if not isinstance(self.gene_residual, bool):
+            raise ValueError("gene_residual must be a boolean")
         if not isinstance(self.gene_statistics, bool):
             raise ValueError("gene_statistics must be a boolean")
         if self.normalization not in ("layernorm", "none"):
@@ -119,6 +122,8 @@ def parse_args(argv=None, *, single=False):
                         help="new-run normalization; none enables an architecture ablation")
     parser.add_argument("--no-gene-stats", dest="gene_statistics", action="store_false", default=None,
                         help="new-run ablation: omit the five log-expression statistics")
+    parser.add_argument("--no-gene-residual", dest="gene_residual", action="store_false", default=None,
+                        help="new-run ablation: disable the gene embedding residual")
     args = parser.parse_args(argv)
     if args.resume:
         # Resume keeps the saved architecture; epochs and clipping are explicit policies.

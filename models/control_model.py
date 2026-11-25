@@ -71,7 +71,8 @@ class ControlPerturbationModel(nn.Module):
 
     First mix learned gene embeddings using cosine attention over control-cell
     expression profiles. Then combine each gene state with each query coordinate
-    and predict expression through the readout MLP. Five pre-L2 log-expression
+    and predict expression through the readout MLP. A gene-embedding residual
+    is added to the merger output before normalization. Five pre-L2 log-expression
     statistics are concatenated directly at the merger to preserve magnitude. Context and target cells may
     overlap or come from different DMSO wells of the same plate and cell line.
 
@@ -90,11 +91,13 @@ class ControlPerturbationModel(nn.Module):
         cell_coordi_dim: int = 2,
         normalization: bool = True,
         gene_statistics: bool = True,
+        gene_residual: bool = True,
     ):
         super().__init__()
 
         self.num_genes = num_of_genes
         self.use_gene_statistics = gene_statistics
+        self.use_gene_residual = gene_residual
 
         self.gene_embedding = nn.Embedding(num_of_genes, dim)
 
@@ -166,6 +169,9 @@ class ControlPerturbationModel(nn.Module):
             merger_inputs.append(statistics)
         gene_states = self.merger(torch.cat(merger_inputs, dim=-1))
 
+        # Identity path preserves gene identity independently of the learned fusion.
+        if self.use_gene_residual:
+            gene_states = gene_states + gene_embeddings
         gene_states = self.merger_norm(gene_states)
 
         # --- part 2: coordinate-conditioned readout ---
