@@ -51,3 +51,10 @@ consortium; see [docs/huggingfacereadme.md](docs/huggingfacereadme.md) for the u
 ---
 **Read the docs:** [docs/README.md](docs/README.md) covers the layout, each folder, and gotchas (including the fact
 that the upstream `data/` folder no longer exists and `tutorials/loading_data.ipynb` still targets HuggingFace).
+## Model training
+
+Run `python run.py` for the interactive full/control model launcher. It supports
+new and resumed runs, all-file or single-file training, tqdm progress, and one
+loss/gradient CSV per run. Checkpoints and metadata live under
+`models/trained_model/model_<timestamp>_{control,full}/`.
+See [models/README_training.md](models/README_training.md) for setup and code layout.

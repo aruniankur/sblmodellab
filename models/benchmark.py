@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import glob
 import os
 import sys
 import time
@@ -45,7 +44,6 @@ if __package__ in (None, ""):
 from models.cli import ask, choose_file
 from models.model import PerturbationModel, perturbation_loss
 from models.molformer_atoms import AtomEmbeddingStore
-from models.tb import TbLogger
 from models.tahoe_data import DEFAULT_ROOT, BackedFile, build_example
 
 GB = 1e9
@@ -118,9 +116,6 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--readout-chunk", type=int, default=None,
                    help="omit for automatic (~1 GB of activations), 0 to disable")
     p.add_argument("--atom-cache", default=None)
-    p.add_argument("--tb", dest="tb", action="store_true", default=True,
-                   help="write TensorBoard logs (on by default)")
-    p.add_argument("--no-tb", dest="tb", action="store_false")
     args = p.parse_args(argv)
 
     # ---- file ------------------------------------------------------------
@@ -226,29 +221,6 @@ def main(argv: list[str] | None = None) -> int:
     rng = np.random.default_rng(0)
     model.train()
 
-    if args.tb:
-        # one run per (file, shape) so two files can never collide, and a re-run
-        # of the same shape replaces the old measurement instead of appending to it
-        shape = f"dim{dim}_h{heads}_l{layers}_c{conc_dim}_b{batch}"
-        tb_dir = str(
-            Path(__file__).resolve().parent / "runs" / "benchmark"
-            / Path(name).stem / shape
-        )
-        for stale in glob.glob(os.path.join(tb_dir, "events.out.*")):
-            os.remove(stale)
-    else:
-        tb_dir = None
-
-    tb = TbLogger(tb_dir, strict=False)
-    if tb.enabled:
-        print(f"  tensorboard: {tb.log_dir}")
-        print(f"    view with: python -m tensorboard.main --logdir models/runs/benchmark")
-        tb.log_file(
-            0,
-            f"{name}  |  dim {dim} heads {heads} layers {layers} "
-            f"conc_dim {conc_dim} batch {batch}",
-        )
-
     if device.type == "cuda":
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
@@ -335,19 +307,12 @@ def main(argv: list[str] | None = None) -> int:
         if step >= args.warmup:
             times.append(step_time)
             losses.append(float(loss.detach()))
-            tb.log_benchmark(
-                step - args.warmup,
-                loss=float(loss.detach()),
-                seconds=step_time,
-                vram=TbLogger.step_vram(),
-            )
             alloc = torch.cuda.max_memory_allocated() / GB if device.type == "cuda" else 0
             reserved = torch.cuda.max_memory_reserved() / GB if device.type == "cuda" else 0
             print(f"{step - args.warmup:>4} {data_time:>7.2f} {step_time:>7.2f} "
                   f"{float(loss.detach()):>10.4f} {alloc:>10.2f}G {reserved:>13.2f}G")
 
     backed.close()
-    tb.close()
 
     # ---- verdict ---------------------------------------------------------
     if status == "oom":

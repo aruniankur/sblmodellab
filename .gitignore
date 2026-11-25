@@ -33,11 +33,12 @@ metadata/
 *.zarr/
 
 # --- 2. runtime artifacts --------------------------------------------------
-# checkpoints (models/runs/<name>/{last,best}.pt ~380 MB each), TensorBoard
-# event files, csv logs, and the MolFormer token cache (67 MB, rebuild with
+# checkpoints (models/runs/<name>/{last,best}.pt ~380 MB each), CSV logs,
+# and the MolFormer token cache (67 MB, rebuild with
 # `python models/molformer_atoms.py`)
 models/runs/
 models/runtime/
+models/trained_model/
 models/cache/
 *.pt
 *.pth
@@ -46,7 +47,6 @@ models/cache/
 *.pkl
 *.npy
 *.npz
-events.out.tfevents.*
 
 # --- 3. generated analysis output -----------------------------------------
 # the .md reports are kept (they document the gradient study); the binary and
@@ -78,6 +78,8 @@ Analysis/
 docs/
 utils/
 tests/
+!models/tests/
+!models/tests/*.py
 logs/
 groups.json
 *.ipynb

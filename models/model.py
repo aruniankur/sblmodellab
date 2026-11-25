@@ -273,6 +273,7 @@ class PerturbationModel(nn.Module):
         Returns (B, C, G) predicted expression.
         """
         # --- unit-normalise each gene's expression profile over the cell axis ---
+        mean_value = control_cell_line.mean(axis=1)
         gene_norms = torch.linalg.norm(control_cell_line, dim=-1, keepdim=True)
         control_cell_line = control_cell_line / gene_norms.clamp_min(1e-12)
 

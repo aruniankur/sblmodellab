@@ -9,13 +9,14 @@
 # (torch 2.6.0+cu124, RTX A2000). Newer should be fine; these are the ones that
 # were actually run.
 
-# --- training (models/train.py, models/benchmark.py, models/tb.py) ---------
+# --- training (models/train.py, models/benchmark.py) ---------
 torch>=2.6                      # install separately, CUDA build
 numpy>=2.0
 scipy>=1.13                     # CSR slicing in models/tahoe_data.py
 pandas>=2.2                     # obs table handling
 anndata>=0.10                   # backed h5ad reading
-tensorboard>=2.15               # optional at runtime: train.py --no-tb
+h5py>=3.10                      # CSR row access
+tqdm>=4.66                      # epoch and backward-pass progress
 
 # --- building the MolFormer token cache (models/molformer_atoms.py) --------
 # only needed once, and only on the machine that builds models/cache/*.pt

@@ -17,7 +17,7 @@ Layout of the dataset (verified against the files on disk):
 One training example is a **well**:
 
     control : n_control cells from a DMSO well of the file
-    target  : n_target cells from one drug well of the same file + their coords
+    target  : n_target cells from a treated or DMSO well of the same file + coords
     chem    : the drug's per-atom MolFormer vectors + log10(dose + 1e-3)
 
 Nothing here touches a model, so ``--dry-run`` can exercise it end to end.
@@ -79,7 +79,7 @@ def build_file_index(
             continue
         out.append(PlateFile(os.path.join(root, name), plate, m.group("cell_line")))
     if not out:
-        raise FileNotFoundError(f"no plate{N}_*.h5ad files found in {root}")
+        raise FileNotFoundError(f"no plate*_*.h5ad files found in {root}")
     return out
 
 
@@ -198,8 +198,7 @@ class BackedFile:
     def read_rows(self, rows: np.ndarray) -> np.ndarray:
         """Dense ``float32 (len(rows), n_vars)`` for arbitrary (unsorted, dup) rows."""
         rows = np.asarray(rows, dtype=np.int64)
-        order = np.argsort(rows, kind="stable")
-        sorted_rows = rows[order]
+        sorted_rows, inverse = np.unique(rows, return_inverse=True)
 
         starts = self._indptr[sorted_rows]
         counts = self._indptr[sorted_rows + 1] - starts
@@ -217,12 +216,10 @@ class BackedFile:
 
         indptr = np.concatenate(([0], np.cumsum(counts))).astype(np.int64)
         matrix = sp.csr_matrix(
-            (values, columns, indptr), shape=(rows.size, self.n_vars)
+            (values, columns, indptr), shape=(sorted_rows.size, self.n_vars)
         )
         dense = matrix.toarray().astype(np.float32, copy=False)
 
-        inverse = np.empty_like(order)
-        inverse[order] = np.arange(order.size)
         return dense[inverse]
 
     def close(self) -> None:
@@ -250,7 +247,9 @@ class FileCache:
 
     def get(self, path: str) -> BackedFile:
         if path in self._open:
-            return self._open[path]  # already resident
+            backed = self._open.pop(path)
+            self._open[path] = backed
+            return backed
         while len(self._open) >= self.maxsize:
             oldest_path = next(iter(self._open))  # insertion order; plates are visited once
             oldest = self._open.pop(oldest_path)
