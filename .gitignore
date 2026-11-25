@@ -39,6 +39,7 @@ metadata/
 models/runs/
 models/runtime/
 models/trained_model/
+models/trained_model_zips/
 models/benchmark_results/
 models/cache/
 *.pt

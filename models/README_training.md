@@ -154,6 +154,7 @@ optimizer updates per invocation; `--max-units-per-epoch` caps sampled units.
 | File | Responsibility |
 |---|---|
 | `run.py` | Interactive menus and environment checks |
+| `zipfolder.py` | Select and ZIP a complete run for transfer |
 | `train.py`, `train_small.py` | Thin command-line entry points |
 | `model.py` | Chemical perturbation architecture |
 | `control_model.py` | Provided DMSO reconstruction architecture |
@@ -297,3 +298,32 @@ Schema-1 and schema-2 checkpoints without the statistics setting resume with
 `gene_statistics=False`; their merger weights, optimizer groups and original
 architecture are preserved. New schema-3 checkpoints save the setting explicitly.
 Start a new run to use five-feature fusion with a formerly statistics-free model.
+
+## Bring a server run back to your PC
+
+From the repository root:
+
+```powershell
+python zipfolder.py
+```
+
+Select a folder listed from `models/trained_model/`. The helper creates a ZIP in
+`models/trained_model_zips/` containing that run's top-level folder, finalized
+weights (including `last.pt` and `best.pt` when present), JSON metadata, CSV logs
+and other finalized run files. It preserves the source folder, supports ZIP64,
+checks ZIP integrity, and uses unique names so earlier exports are not replaced.
+Temporary `.tmp`/`.partial` files are omitted. Changes to the selected run during
+export cause the export to fail rather than publish an inconsistent archive.
+
+`python models/zipfolder.py` also works. No torch, CUDA or third-party libraries
+are required. For non-interactive use:
+
+```powershell
+python zipfolder.py --folder model_<timestamp>_control
+python zipfolder.py --folder model_<timestamp>_full --out /scratch/exports
+```
+
+Transfer the resulting ZIP to your PC, extract it into `models/trained_model/`,
+to keep its weights and metadata together. The ZIP contains the run only; the PC
+still needs the code and any dataset/drug cache required to train. Continuing
+training also requires the saved data paths to be available on the destination.
