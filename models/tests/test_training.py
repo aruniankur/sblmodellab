@@ -68,7 +68,7 @@ class PipelineTests(unittest.TestCase):
         defaults = dict(model_type="control", root=str(self.data), dim=16, conc_dim=4,
                         heads=2, layers=1, epochs=1, n_control=8, n_target=8, min_cells=2,
                         passes_per_cell_line=1, batches_per_unit=2, file_cache=2,
-                        query_chunk=5, readout_chunk=3, amp="off", dropout=0., save_every=1)
+                        query_chunk=5, readout_chunk=3, amp="off", dropout=0., grad_clip=3., save_every=1)
         return TrainingConfig(**{**defaults, **values})
 
     def test_duplicate_rows_and_same_well_overlap(self):
@@ -192,6 +192,99 @@ class PipelineTests(unittest.TestCase):
                 if name in grads:
                     torch.testing.assert_close(grads[name], p.grad, atol=1e-6, rtol=1e-4)
 
+    def test_normalization_locations_and_gradients(self):
+        for model_type in ("control", "full"):
+            cfg = self.cfg(model_type=model_type, layers=2)
+            model = create_model(cfg, 16, 5)
+            norms = {name: module for name, module in model.named_modules()
+                     if isinstance(module, torch.nn.LayerNorm)}
+            expected = {"merger_norm"}
+            if model_type == "full":
+                expected |= {"chem_norm", "final_norm"}
+                expected |= {f"layers.{i}.{name}" for i in range(2)
+                             for name in ("query_norm", "joint_norm")}
+            self.assertEqual(set(norms), expected)
+            for name, module in norms.items():
+                self.assertEqual(module.normalized_shape, (32,) if name.endswith("joint_norm") else (16,))
+            chemistry_calls = []
+            handle = model.chem_norm.register_forward_hook(lambda *args: chemistry_calls.append(1)) if model_type == "full" else None
+            context = torch.rand(1, 16, 8)
+            coords = torch.rand(1, 4, 2)
+            args = (context, coords) if model_type == "control" else (
+                context, torch.rand(1, 3, 5), coords,
+                torch.ones(1, 1, 1, 3, dtype=torch.bool))
+            output = model(*args, query_chunk=5, readout_chunk=2)
+            self.assertEqual(output.shape, (1, 4, 16))
+            self.assertTrue(torch.isfinite(output).all())
+            output.square().mean().backward()
+            for module in norms.values():
+                for parameter in module.parameters():
+                    self.assertIsNotNone(parameter.grad)
+                    self.assertTrue(torch.isfinite(parameter.grad).all())
+            if handle is not None:
+                self.assertEqual(len(chemistry_calls), 1)
+                handle.remove()
+            legacy = create_model(self.cfg(model_type=model_type, normalization="none"), 16, 5)
+            self.assertFalse(any(isinstance(m, torch.nn.LayerNorm) for m in legacy.modules()))
+            self.assertFalse(any("norm." in key for key in legacy.state_dict()))
+
+    def test_normalized_models_have_finite_bf16_gradients(self):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if device.type == "cuda" and not torch.cuda.is_bf16_supported():
+            self.skipTest("GPU does not support BF16")
+        for model_type in ("control", "full"):
+            model = create_model(self.cfg(model_type=model_type, layers=2), 16, 5).to(device)
+            context = torch.rand(1, 16, 8, device=device)
+            coords = torch.rand(1, 4, 2, device=device)
+            args = (context, coords) if model_type == "control" else (
+                context, torch.rand(1, 3, 5, device=device), coords,
+                torch.tensor([True, True, False], device=device)[None, None, None, :])
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                output = model(*args, query_chunk=5, readout_chunk=2)
+            loss = output.float().square().mean()
+            loss.backward()
+            self.assertTrue(torch.isfinite(loss))
+            for parameter in model.parameters():
+                if parameter.grad is not None:
+                    self.assertTrue(torch.isfinite(parameter.grad).all())
+
+    def test_pre_normalization_checkpoint_migrates_without_architecture_change(self):
+        with patch("models.training.checkpoints.TRAINED_ROOT", self.root / "runs"):
+            run = train(self.cfg(normalization="none", gene_statistics=False))
+            original = torch.load(run / "last.pt", map_location="cpu", weights_only=False)
+            original["schema_version"] = 1
+            original["config"].pop("normalization")
+            original["config"].pop("gene_statistics")
+            torch.save(original, run / "last.pt")
+            _, restored = load_checkpoint(run)
+            self.assertEqual(restored["config"]["normalization"], "none")
+            model = create_model(TrainingConfig(**restored["config"]), 16)
+            model.load_state_dict(restored["model"], strict=True)
+            train(resume=str(run), additional_epochs=1)
+        _, resumed = load_checkpoint(run)
+        self.assertEqual(resumed["schema_version"], 3)
+        self.assertEqual(resumed["config"]["normalization"], "none")
+        self.assertEqual(resumed["progress"]["epoch"], 2)
+        self.assertFalse(any("norm." in key for key in resumed["model"]))
+
+    def test_pre_statistics_normalized_checkpoint_preserves_original_merger(self):
+        with patch("models.training.checkpoints.TRAINED_ROOT", self.root / "runs"):
+            run = train(self.cfg(gene_statistics=False))
+            original = torch.load(run / "last.pt", map_location="cpu", weights_only=False)
+            original["schema_version"] = 2
+            original["config"].pop("gene_statistics")
+            torch.save(original, run / "last.pt")
+            _, restored = load_checkpoint(run)
+            self.assertFalse(restored["config"]["gene_statistics"])
+            self.assertEqual(restored["config"]["normalization"], "layernorm")
+            self.assertEqual(restored["model"]["merger.weight"].shape[1], 20)
+            train(resume=str(run), additional_epochs=1)
+        _, resumed = load_checkpoint(run)
+        self.assertEqual(resumed["schema_version"], 3)
+        self.assertFalse(resumed["config"]["gene_statistics"])
+        self.assertEqual(resumed["model"]["merger.weight"].shape[1], 20)
+        self.assertEqual(resumed["progress"]["epoch"], 2)
+
     def test_remaining_training_combinations(self):
         configs = [self.cfg(model_type="full", val_cell_lines=1),
                    self.cfg(mode="single", file=str(self.data / "plate1_A.h5ad"))]
@@ -225,12 +318,12 @@ class PipelineTests(unittest.TestCase):
     def test_interactive_new_and_resume_menus(self):
         from models.run import main
         with patch("models.run.check_environment", return_value="off"), patch(
-                "builtins.input", side_effect=["1", "2", "1", "16", "4", "2", "1", "3"]), patch(
+                "builtins.input", side_effect=["1", "2", "1", "8", "128", "1", "3"]), patch(
                 "models.training.engine.train") as training:
             main()
             cfg = training.call_args.args[0]
             self.assertEqual((cfg.model_type, cfg.mode, cfg.dim, cfg.conc_dim,
-                              cfg.heads, cfg.layers, cfg.epochs), ("control", "all", 16, 4, 2, 1, 3))
+                              cfg.heads, cfg.layers, cfg.epochs), ("control", "all", 1024, 128, 8, 1, 3))
         saved = self.root / "model_example_control"
         saved.mkdir()
         (saved / "last.pt").touch()
@@ -242,6 +335,46 @@ class PipelineTests(unittest.TestCase):
             main()
             training.assert_called_once_with(resume=str(saved), additional_epochs=7)
 
+    def test_head_sizing_defaults_and_command_line(self):
+        _, cfg = parse_args(["--heads", "8", "--head-dim", "128"])
+        self.assertEqual((cfg.dim, cfg.conc_dim, cfg.head_dim), (1024, 128, 128))
+        self.assertEqual(cfg.grad_clip, 3.)
+        _, single = parse_args(["--model", "control", "--heads", "4", "--head-dim", "16",
+                                "--file", str(self.data / "plate1_A.h5ad")], single=True)
+        self.assertEqual((single.dim, single.conc_dim, single.grad_clip), (64, 16, 3.))
+        cfg = TrainingConfig(heads=2, head_dim=8)
+        self.assertEqual((cfg.dim, cfg.conc_dim), (16, 8))
+        cfg.dim = 32
+        with self.assertRaisesRegex(ValueError, "heads \* head_dim"):
+            cfg.validate()
+        with self.assertRaises(ValueError):
+            TrainingConfig(heads=0, head_dim=8)
+        with self.assertRaises(ValueError):
+            TrainingConfig(heads=8, head_dim=129).validate()
+
+    def test_derived_head_shapes_train_and_save_for_both_models(self):
+        for model_type in ("control", "full"):
+            cfg = self.cfg(model_type=model_type, head_dim=8, mode="single",
+                           file=str(self.data / "plate1_A.h5ad"))
+            with patch("models.training.checkpoints.TRAINED_ROOT", self.root / "runs"), patch(
+                    "models.training.engine.load_chemistry", side_effect=lambda c:
+                    FakeChemistry() if c.model_type == "full" else None):
+                run = train(cfg)
+            _, state = load_checkpoint(run)
+            self.assertEqual((state["config"]["heads"], state["config"]["head_dim"],
+                              state["config"]["dim"], state["config"]["conc_dim"]), (2, 8, 16, 8))
+            self.assertEqual(tuple(state["model"]["conc_emb.weight"].shape), (8, 16))
+            self.assertEqual(state["config"]["grad_clip"], 3.)
+
+    def test_legacy_resume_preserves_shape_and_uses_clipping_three(self):
+        with patch("models.training.checkpoints.TRAINED_ROOT", self.root / "runs"):
+            run = train(self.cfg(grad_clip=1.))
+            train(resume=str(run), additional_epochs=1)
+        _, state = load_checkpoint(run)
+        self.assertEqual((state["config"]["dim"], state["config"]["conc_dim"]), (16, 4))
+        self.assertEqual(state["config"]["grad_clip"], 3.)
+        self.assertEqual(state["progress"]["epoch"], 2)
+
     def test_single_rejects_excluded_plate_and_cli_resume_uses_saved_config(self):
         cfg = self.cfg(mode="single", file=str(self.write_file(13, "A")))
         with self.assertRaisesRegex(ValueError, "plate1..plate12"):
@@ -250,7 +383,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(args.epochs, 3)
         self.assertIsNone(cfg)
         with self.assertRaises(SystemExit):
-            parse_args(["--resume", "some_run", "--dim", "64"])
+            parse_args(["--resume", "some_run", "--head-dim", "64"])
 
 
 if __name__ == "__main__":

@@ -84,3 +84,4 @@ tests/
 logs/
 groups.json
 *.ipynb
+outputs

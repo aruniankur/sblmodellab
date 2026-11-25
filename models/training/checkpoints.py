@@ -11,7 +11,7 @@ import torch
 
 from models.training.config import TRAINED_ROOT
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 
 def write_json(path, value):
@@ -44,8 +44,19 @@ def checkpoint_path(value):
 def load_checkpoint(value):
     path = checkpoint_path(value)
     state = torch.load(path, map_location="cpu", weights_only=False)
-    if state.get("schema_version") != SCHEMA_VERSION:
+    if state.get("schema_version") not in (1, 2, SCHEMA_VERSION):
         raise ValueError("This checkpoint predates the organized pipeline; start a new run")
+    if state["schema_version"] == 1:
+        # Older runs have no norm parameters or matching optimizer/CSV groups.
+        # Resume their original architecture; never silently insert trainable layers.
+        state["config"].setdefault("normalization", "none")
+    elif "normalization" not in state["config"]:
+        raise ValueError("Checkpoint is missing its normalization architecture setting")
+    if state["schema_version"] < 3:
+        # Old merger weights have no additional statistic columns.
+        state["config"].setdefault("gene_statistics", False)
+    elif "gene_statistics" not in state["config"]:
+        raise ValueError("Checkpoint is missing its gene-statistics architecture setting")
     return path.parent, state
 
 

@@ -2,7 +2,7 @@
 %% B: examples (currently 1 per forward); G: genes; Cin: context cells;
 %% Cout: target cells; T: real SMILES tokens; D: dim; K: conc_dim; H: heads.
 flowchart TD
-    RUN["run.py: dependency and GPU checks<br/>new run or resume; full or control; all files or one file"]
+    RUN["run.py: dependency and GPU checks<br/>new run or resume; full or control; all files or one file<br/>heads and head_dim → D=heads*head_dim, K=head_dim"]
     RUN --> PLAN["training/data.py<br/>plates 1-12; finite-coordinate wells; consistent gene order"]
     PLAN --> SAMPLE["Same plate and cell line<br/>256 DMSO context cells + 128 target cells<br/>cross-well and overlapping cells allowed"]
     SAMPLE --> NORM["Raw counts → normalize each cell to 10,000 → log1p"]
@@ -16,11 +16,14 @@ flowchart TD
         UNIT --> COS["Cosine SDPA<br/>Q=normalized context, K=normalized context<br/>V=compressed gene embeddings; scale=10"]
         COMP --> COS
         COS --> FFN["conc_ffn: K → D → K; GELU"]
-        FFN --> MERGE["Concatenate with learned gene embeddings<br/>merger: D+K → D"]
+        FFN --> MERGE["Concatenate with learned gene embeddings<br/>merger: D+K+5 → D"]
         GENE --> MERGE
+        CTRL --> STATS["Before L2: five log-expression features per gene<br/>mean, population std, detected fraction<br/>positive median, positive p90"]
+        STATS --> MERGE
     end
 
-    MERGE --> MODE{"Model type"}
+    MERGE --> MNORM["LayerNorm D after merger"]
+    MNORM --> MODE{"Model type"}
     MODE -->|full| BLOCK
     MODE -->|control: bypass attention| STATES
 
@@ -28,26 +31,33 @@ flowchart TD
     MOL --> CACHE["atom_embeddings.pt<br/>all real tokens by default; special-token rows removed"]
     CACHE --> CHEM["Append log10(dose + 0.001) to each token<br/>B × T × 769; valid-token mask"]
     CHEM --> PROJECT["chem_embedding: 769 → D"]
+    PROJECT --> CNORM["LayerNorm D on chemical states<br/>computed once before the stack"]
 
     subgraph BLOCK["Full model only: ExternalPerturbAttention × layers"]
-        PROJECT --> CROSS["Multi-head cross-attention<br/>Q=gene states; K,V=drug tokens; valid-token mask"]
+        QNORM["LayerNorm D → q_linear on gene states"] --> CROSS["Multi-head cross-attention<br/>Q=normalized gene queries; K,V=normalized drug states; valid-token mask"]
+        CNORM --> CROSS
         CROSS --> CFFN["chem_ffn: D → 4D → D; GELU"]
         CFFN --> CAT["Concatenate input gene states and chemical context"]
-        CAT --> QKV["kqv: 2D → 3D; split in K,Q,V order"]
+        CAT --> JNORM["LayerNorm 2D on concatenated features"]
+        JNORM --> QKV["kqv: 2D → 3D; split in K,Q,V order"]
         QKV --> SELF["Multi-head gene self-attention<br/>H heads over G gene tokens"]
         SELF --> GFFN["gene_ffn: D → 4D → D; GELU"]
         GFFN --> RES["Residual: input gene states + gene context"]
     end
-    BLOCK --> STATES["Gene states: B × G × D"]
+    BLOCK --> FNORM["LayerNorm D after full stack"]
+    FNORM --> STATES["Gene states: B × G × D"]
     STATES --> READOUT["Broadcast gene states and target coordinates<br/>Concatenate coordinates first: B × Cout × G × D+2"]
     COORD --> READOUT
     READOUT --> MLP["coordi_layer: D+2 → D/2 → D/4 → 1<br/>GELU between linear layers"]
     MLP --> PRED["Predicted expression: B × Cout × G"]
     PRED --> LOSS["Squared error: sum over genes, mean over cells and batch<br/>divide by sqrt G"]
     TARGET --> LOSS
-    LOSS --> BACK["Backward per target well; accumulate loss divided by unit size<br/>gradient clipping → one AdamW update per unit"]
+    LOSS --> BACK["Backward per target well; accumulate loss divided by unit size<br/>gradient clipping at norm 3 → one AdamW update per unit"]
     BACK --> LOG["log.csv: one row per backward pass<br/>loss + gradients + sample metadata + timing + peak VRAM"]
     BACK --> SAVE["models/trained_model/model_timestamp_control or full<br/>info.json, config.json, last.pt, best.pt"]
     CHUNK["Memory controls: query chunks for cosine SDPA<br/>readout chunks across target cells; activation recomputation"] -.-> COS
     CHUNK -.-> READOUT
-    NOTE["Control has no chemical branch or attention stack.<br/>heads/layers/dropout do not change its computation.<br/>Target coordinates are supplied expression-derived inputs."] -.-> MODE
+    NOTE["Control has no chemical branch or attention stack.<br/>Head sizing determines D and K; layers/dropout are inactive.<br/>Target coordinates are supplied expression-derived inputs."] -.-> MODE
+
+%% LayerNorm nodes describe new normalized runs; legacy/ablation runs bypass them.
+%% Statistics-free legacy/ablation runs omit STATS and use merger width D+K.

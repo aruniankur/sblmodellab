@@ -16,14 +16,17 @@ launcher; `python models/run.py` and `cd models; python run.py` also work.
    otherwise; CPU fallback is reported explicitly.
 3. Choose a new run or an existing saved run.
 4. For a new run, choose `full` or `control`, then all files or one file.
-5. Enter only `dim`, `conc_dim`, `heads`, `layers` and `epochs`. Gene count and
-   chemical feature width come from the dataset and MolFormer cache.
+5. Enter only `heads`, `head_dim`, `layers` and `epochs`. Total width is
+   `dim = heads * head_dim`; the co-expression bottleneck is `conc_dim = head_dim`.
+   Gene count and chemical feature width come from the data and MolFormer cache.
 6. For an existing run, choose the run and enter the number of additional epochs.
-   Saved model, optimizer, data selection and training settings are restored.
+   Saved architecture, optimizer and data selection are restored. Clipping uses
+   the current default of `3.0`, including when resuming an older run.
 
-`heads`, `layers` and `dropout` have no computational effect in the provided
-control architecture: it has no perturbation-attention stack. These settings are
-recorded for compatibility, and the launcher explains this before prompting.
+For example, `heads=8` and `head_dim=128` creates `dim=1024` and `conc_dim=128`.
+The control model also uses these derived widths, but has no attention stack,
+so `layers` and `dropout` do not affect its computation. Existing checkpoints
+retain their original widths and bottleneck, even if they predate this sizing rule.
 
 ## Two models, two training modes
 
@@ -72,14 +75,13 @@ The full model reads `models/cache/atom_embeddings.pt`. Build it once with:
 python models/molformer_atoms.py
 ```
 
-The control path never loads that cache. Both models retain the supplied forward
-architecture. The objective is squared error summed over genes, averaged over
+The control path never loads that cache. Both models use the targeted hidden-state normalization described below. The objective is squared error summed over genes, averaged over
 cells and examples, and divided by `n_genes ** 0.5`.
 
 Full-grid defaults: AdamW, learning rate `1e-4`, weight decay `0.01`, gradient
-clipping `1.0`, dropout `0.1`, width `512`, bottleneck `32`, eight heads and one
-perturbation block. Single-file fitting uses learning rate `3e-4`, clipping `10`
-and dropout `0`. Query chunk `4096` and readout chunk `16` bound activation memory.
+clipping `3.0`, dropout `0.1`, eight heads of width `64` (total width `512`,
+bottleneck `64`) and one perturbation block. Single-file fitting uses learning
+rate `3e-4` and dropout `0`, also with clipping `3.0`. Query chunk `4096` and readout chunk `16` bound activation memory.
 
 Install torch with the appropriate CUDA build, then:
 
@@ -106,7 +108,9 @@ models/trained_model/
 Every new run creates a unique directory, including single-file runs. Resuming
 continues in the same directory and appends to its CSV. The checkpoint restores
 best score, gene vocabulary, selected experiments, position within an epoch,
-optimizer and NumPy/PyTorch CPU/CUDA random states.
+optimizer and NumPy/PyTorch CPU/CUDA random states. The normalization setting is
+also saved. Pre-normalization checkpoints resume with `normalization=none`;
+start a new run to use LayerNorm rather than silently changing an old experiment.
 
 `last.pt` is atomically replaced every 50 optimizer steps and at epoch boundaries.
 A newly initialized model also gets an initial checkpoint. An interrupted run
@@ -132,15 +136,15 @@ this requires a temporary copy of the preceding gradients.
 
 ```powershell
 python models/train.py --model control --epochs 60
-python models/train.py --model full --epochs 60
+python models/train.py --model full --heads 8 --head-dim 128 --epochs 60
 python models/train_small.py --model control --file plate6_CVCL_1125.h5ad --epochs 10
 python models/train_small.py --model full --file plate6_CVCL_1125.h5ad --epochs 10
 python models/train.py --resume models/trained_model/<run> --epochs 10
 python models/train.py --model control --dry-run
 ```
 
-On resume, `--epochs` means additional epochs and other configuration overrides
-are rejected. Use `--help` for script-only settings, including sampling counts,
+On resume, `--epochs` means additional epochs. Clipping defaults to `3.0`;
+`--grad-clip` can override it explicitly. Architecture overrides are rejected. Use `--help` for script-only settings, including sampling counts,
 precision, memory chunks, save frequency and debug limits. `--max-steps` limits
 optimizer updates per invocation; `--max-units-per-epoch` caps sampled units.
 `--dry-run` builds a data plan and one example without creating a training run.
@@ -153,6 +157,7 @@ optimizer updates per invocation; `--max-units-per-epoch` caps sampled units.
 | `train.py`, `train_small.py` | Thin command-line entry points |
 | `model.py` | Chemical perturbation architecture |
 | `control_model.py` | Provided DMSO reconstruction architecture |
+| `expression_features.py` | Shared five-feature summaries of pre-L2 log-expression |
 | `tahoe_data.py` | Backed H5AD reading, well grouping, normalization, row sampling |
 | `molformer_atoms.py` | Offline drug embedding cache builder/reader |
 | `training/config.py` | Defaults, validation, CLI configuration |
@@ -186,17 +191,19 @@ unknown coordinates or prove that the chemical branch is being used.
 python models/benchmark.py
 ```
 
-Enter dimension start/end/step and layer start/end, then select a real H5AD file.
+Enter the number of heads, per-head dimension start/end/step, and layer start/end,
+then select a real H5AD file. Total width and bottleneck are derived for every shape.
 For a scriptable sweep:
 
 ```powershell
-python models/benchmark.py --file plate6_CVCL_1125.h5ad --dim-start 256 --dim-end 1024 --dim-step 256 --layers-start 1 --layers-end 4
+python models/benchmark.py --file plate6_CVCL_1125.h5ad --heads 8 --head-dim-start 32 --head-dim-end 128 --head-dim-step 32 --layers-start 1 --layers-end 4
 ```
 
 Both ranges use inclusive bounds (the end is tested if aligned with the step).
-`--layers-step` defaults to 1. Heads default to 8 and the co-expression bottleneck
-to 32; use `--heads` and `--conc-dim` to change them. Shapes incompatible with
-`dim % heads == 0` or `dim / heads <= 128` are recorded as `invalid` and skipped.
+`--layers-step` defaults to 1. Heads default to 8 when prompted. For every
+candidate, `dim = heads * head_dim` and `conc_dim = head_dim`; neither total dim
+nor conc_dim is requested. Full-model candidates with `head_dim > 128` are
+recorded as `invalid` because of the existing attention-kernel constraint.
 
 Each shape runs in a fresh subprocess using actual cells, all genes in the file,
 chemical tokens, the same chunk sizes and precision as training, and the full
@@ -218,10 +225,75 @@ allocated/reserved GPU memory, and a result for every pair:
 - `nonfinite`, `invalid`, `error`: numerical, shape-validation or execution failure.
 - `cpu_completed`: training worked on CPU; this is not a GPU-capacity verdict.
 
-The summary reports the largest fitting tested dimension for each layer count.
+The summary reports the largest fitting per-head and total dimensions for each
+layer count. Result rows include heads, head_dim, dim and conc_dim.
 Use `--steps`, `--warmup`, `--timeout`, `--max-vram-fraction`, `--amp`,
 `--query-chunk`, `--readout-chunk` and sampling flags to match your intended run.
 A short benchmark on one file measures that workload; it is not a guarantee for
 all drug lengths, background GPU usage or a complete long training run.
 `--model control` is also supported, but layer counts have no effect there, so it
-runs one trial per dimension rather than repeating identical architectures.
+runs one trial per head dimension rather than repeating identical architectures.
+
+## Targeted hidden-state normalization
+
+New runs default to `normalization=layernorm` in both training modes and the
+capacity benchmark. The initial experiment adds only these placements:
+
+| Model | Placement | Normalized feature width |
+|---|---|---|
+| Both | After `merger`, before attention or readout | `dim` |
+| Full | After chemical projection, once before the stack | `dim` |
+| Full | Before each block's `q_linear` | `dim` |
+| Full | Before each block's `kqv` on concatenated gene/chemical context | `2 * dim` |
+| Full | After the complete attention stack, before readout | `dim` |
+
+LayerNorm uses learnable scale/bias and epsilon `1e-5`. It normalizes each token's
+hidden features; it never normalizes across genes or cells. The chemical states
+are normalized once because they are reused unchanged across attention blocks.
+The cosine kernel, raw coordinates, FFNs, residual connections and prediction
+outputs are unchanged. No extra `conc_ffn` or FFN normalization or coordinate
+encoder is introduced. Magnitude statistics enter the merger as described below.
+
+For an explicit new-run ablation, pass `--normalization none` to `train.py`,
+`train_small.py` or `benchmark.py`. Saved metadata and benchmark results record
+which architecture was used. Gradient columns include each trainable norm group.
+
+Checkpoint schema 2 introduced the normalization setting; schema 3 also records
+the gene-statistics setting. Schema-1 checkpoints
+without that setting are interpreted as `none`, preserving their weights,
+optimizer parameter groups and CSV schema on resume. Normalized checkpoints
+resume with their own LayerNorm parameters and optimizer state. Normalization
+cannot be changed during resume; use a fresh run for a different architecture.
+
+## Five per-gene log-expression features
+
+New full and control models append five features directly to `self.merger`:
+
+1. Mean `log1p(CP10K)` expression across the sampled DMSO context cells.
+2. Population standard deviation of those same log values (`correction=0`).
+3. Detected fraction: number of positive log values divided by context-cell count.
+4. Median of strictly positive log-expression values.
+5. 90th percentile of strictly positive log-expression values.
+
+The shared implementation is `expression_features.py`. It operates on the
+existing `(B, G, C)` log-expression tensor **before** gene-wise L2 normalization.
+It does not reconstruct counts, apply another logarithm, normalize the summaries
+or fit a negative-binomial distribution. Reductions and quantile calculations
+run in FP32 even inside mixed precision. Positive quantiles use linear
+interpolation and one shared sort. For an all-zero gene, all five features are
+zero; with one positive value, both positive quantiles equal that value.
+
+The concatenation order is `[gene_embedding, coexpression_context, statistics]`,
+where statistics follow the list above. The merger is now
+`Linear(dim + conc_dim + 5, dim)`, followed by the existing merger LayerNorm.
+No additional MLP is introduced. All summaries are invariant to control-cell
+order and describe the same sampled DMSO population used by the cosine pathway.
+
+The full training, single-file training and capacity benchmark use the same
+feature implementation. Config/metadata record `gene_statistics` and feature
+names. Use `--no-gene-stats` for an explicit new-run ablation.
+
+Schema-1 and schema-2 checkpoints without the statistics setting resume with
+`gene_statistics=False`; their merger weights, optimizer groups and original
+architecture are preserved. New schema-3 checkpoints save the setting explicitly.
+Start a new run to use five-feature fusion with a formerly statistics-free model.

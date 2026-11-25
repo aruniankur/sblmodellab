@@ -10,6 +10,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
+if __package__ in (None, ""):
+    from expression_features import NUM_GENE_STATS, gene_expression_statistics
+else:
+    from .expression_features import NUM_GENE_STATS, gene_expression_statistics
+
 
 def _chunked_sdpa(
     query: torch.Tensor,
@@ -66,7 +71,8 @@ class ControlPerturbationModel(nn.Module):
 
     First mix learned gene embeddings using cosine attention over control-cell
     expression profiles. Then combine each gene state with each query coordinate
-    and predict expression through the readout MLP. Context and target cells may
+    and predict expression through the readout MLP. Five pre-L2 log-expression
+    statistics are concatenated directly at the merger to preserve magnitude. Context and target cells may
     overlap or come from different DMSO wells of the same plate and cell line.
 
     num_heads, dropout and num_layers are compatibility arguments only; this
@@ -82,10 +88,13 @@ class ControlPerturbationModel(nn.Module):
         num_layers: int = 4,
         num_of_genes: int = 1000,
         cell_coordi_dim: int = 2,
+        normalization: bool = True,
+        gene_statistics: bool = True,
     ):
         super().__init__()
 
         self.num_genes = num_of_genes
+        self.use_gene_statistics = gene_statistics
 
         self.gene_embedding = nn.Embedding(num_of_genes, dim)
 
@@ -97,7 +106,8 @@ class ControlPerturbationModel(nn.Module):
             nn.Linear(dim , conc_dim),
         )
 
-        self.merger = nn.Linear(dim + conc_dim, dim)
+        self.merger = nn.Linear(dim + conc_dim + (NUM_GENE_STATS if gene_statistics else 0), dim)
+        self.merger_norm = nn.LayerNorm(dim) if normalization else nn.Identity()
 
         self.coordi_layer = nn.Sequential(
             nn.Linear(dim + cell_coordi_dim, dim // 2),
@@ -120,7 +130,8 @@ class ControlPerturbationModel(nn.Module):
         memory through tiling and activation recomputation.
         """
         # --- unit-normalise each gene's expression profile over the cell axis ---
-        mean_value = control_cell_line.mean(axis=1)
+        # Preserve magnitude summaries before the cosine pathway removes scale.
+        statistics = gene_expression_statistics(control_cell_line) if self.use_gene_statistics else None
         gene_norms = torch.linalg.norm(control_cell_line, dim=-1, keepdim=True)
         control_cell_line = control_cell_line / gene_norms.clamp_min(1e-12)
         
@@ -150,9 +161,12 @@ class ControlPerturbationModel(nn.Module):
 
         coexpression_context = self.conc_ffn(coexpression_context)
 
-        gene_states = self.merger(
-            torch.cat([gene_embeddings, coexpression_context], dim=-1)
-        )
+        merger_inputs = [gene_embeddings, coexpression_context]
+        if statistics is not None:
+            merger_inputs.append(statistics)
+        gene_states = self.merger(torch.cat(merger_inputs, dim=-1))
+
+        gene_states = self.merger_norm(gene_states)
 
         # --- part 2: coordinate-conditioned readout ---
         if readout_chunk is None:

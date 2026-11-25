@@ -18,8 +18,9 @@ class TrainingConfig:
     root: str = DEFAULT_ROOT
     file: str = ""
     dim: int = 512
-    conc_dim: int = 32
+    conc_dim: int = 64
     heads: int = 8
+    head_dim: int | None = None  # None preserves the architecture of legacy checkpoints
     layers: int = 1
     epochs: int = 60
     n_control: int = 256
@@ -32,8 +33,10 @@ class TrainingConfig:
     val_plates: int = 2
     lr: float = 1e-4
     weight_decay: float = 0.01
-    grad_clip: float = 1.0
+    grad_clip: float = 3.0
     dropout: float = 0.1
+    normalization: str = "layernorm"
+    gene_statistics: bool = True
     scale_exponent: float = 0.5
     amp: str = "bf16"
     query_chunk: int = 4096
@@ -45,6 +48,18 @@ class TrainingConfig:
     max_steps: int = 0
     max_units_per_epoch: int = 0
 
+    def __post_init__(self):
+        if self.head_dim is not None:
+            self.set_head_shape(self.heads, self.head_dim)
+
+    def set_head_shape(self, heads: int, head_dim: int):
+        """Single source of truth for new-run sizing; saved legacy widths stay intact."""
+        if heads < 1 or head_dim < 1:
+            raise ValueError("heads and head_dim must be positive")
+        self.heads, self.head_dim = heads, head_dim
+        self.dim = heads * head_dim
+        self.conc_dim = head_dim
+
     def validate(self):
         if self.model_type not in ("full", "control") or self.mode not in ("all", "single"):
             raise ValueError("Choose full/control model and all/single training mode")
@@ -52,12 +67,18 @@ class TrainingConfig:
                     "min_cells", "passes_per_cell_line", "batches_per_unit", "file_cache"):
             if getattr(self, key) <= 0:
                 raise ValueError(f"{key} must be positive")
+        if self.head_dim is not None and (self.dim != self.heads * self.head_dim or self.conc_dim != self.head_dim):
+            raise ValueError("dim must equal heads * head_dim and conc_dim must equal head_dim")
         if self.dim < 4 or self.layers < 0:
             raise ValueError("dim must be >= 4 and layers must be >= 0")
         if self.model_type == "full" and (self.dim % self.heads or self.dim // self.heads > 128):
             raise ValueError("dim must be divisible by heads and dim / heads must be <= 128")
         if self.model_type == "full" and self.layers < 1:
             raise ValueError("The full model needs at least one perturbation layer")
+        if not isinstance(self.gene_statistics, bool):
+            raise ValueError("gene_statistics must be a boolean")
+        if self.normalization not in ("layernorm", "none"):
+            raise ValueError("normalization must be layernorm or none")
         if self.amp not in ("off", "bf16"):
             raise ValueError("Supported precision modes: off, bf16")
         if self.chem_tokens not in ("all", "atoms"):
@@ -84,7 +105,7 @@ def parse_args(argv=None, *, single=False):
     parser.add_argument("--file", default=None)
     parser.add_argument("--resume", default="", help="Run folder or last.pt; --epochs adds epochs")
     parser.add_argument("--dry-run", action="store_true", help="Inspect selection and one batch; no run saved")
-    for flag in ("dim", "conc-dim", "heads", "layers", "epochs", "n-control", "n-target",
+    for flag in ("head-dim", "heads", "layers", "epochs", "n-control", "n-target",
                  "min-cells", "passes-per-cell-line", "batches-per-unit", "file-cache",
                  "val-cell-lines", "val-plates", "query-chunk", "readout-chunk", "seed",
                  "save-every", "max-steps", "max-units-per-epoch"):
@@ -94,19 +115,24 @@ def parse_args(argv=None, *, single=False):
     parser.add_argument("--amp", choices=("off", "bf16"), default=None)
     parser.add_argument("--chem-tokens", choices=("all", "atoms"), default=None)
     parser.add_argument("--atom-cache", default=None)
+    parser.add_argument("--normalization", choices=("layernorm", "none"), default=None,
+                        help="new-run normalization; none enables an architecture ablation")
+    parser.add_argument("--no-gene-stats", dest="gene_statistics", action="store_false", default=None,
+                        help="new-run ablation: omit the five log-expression statistics")
     args = parser.parse_args(argv)
     if args.resume:
-        # A resumed run uses its saved settings, rather than CLI defaults.
+        # Resume keeps the saved architecture; epochs and clipping are explicit policies.
         supplied = {k: v for k, v in vars(args).items()
-                    if k not in ("resume", "epochs", "dry_run") and v is not None}
+                    if k not in ("resume", "epochs", "grad_clip", "dry_run") and v is not None}
         if supplied or args.dry_run:
-            parser.error("With --resume, supply only --epochs (additional epochs)")
+            parser.error("With --resume, supply only --epochs and optionally --grad-clip")
         return args, None
     values = {k: v for k, v in vars(args).items()
               if k not in ("resume", "dry_run") and v is not None}
+    values.setdefault("head_dim", 64)
     values["mode"] = "single" if single else "all"
     if single:
-        values = {"lr": 3e-4, "dropout": 0.0, "grad_clip": 10.0, "epochs": 10, **values}
+        values = {"lr": 3e-4, "dropout": 0.0, "epochs": 10, **values}
         if not values.get("file"):
             from models.cli import choose_file
             values["file"] = choose_file(values.get("root", DEFAULT_ROOT))

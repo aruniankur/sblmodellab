@@ -10,7 +10,8 @@ from models.model import PerturbationModel, perturbation_loss
 def create_model(cfg, n_genes, chem_dim=None):
     kwargs = dict(dim=cfg.dim, conc_dim=cfg.conc_dim, num_heads=cfg.heads,
                   num_layers=cfg.layers, dropout=cfg.dropout, num_of_genes=n_genes,
-                  cell_coordi_dim=2)
+                  cell_coordi_dim=2, normalization=cfg.normalization == "layernorm",
+                  gene_statistics=cfg.gene_statistics)
     if cfg.model_type == "control":
         return ControlPerturbationModel(**kwargs)
     if chem_dim is None:

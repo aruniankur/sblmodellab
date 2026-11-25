@@ -14,7 +14,8 @@ from models.training.engine import dry_run, train
 def main(argv=None):
     args, cfg = parse_args(argv, single=True)
     if args.resume:
-        return train(resume=args.resume, additional_epochs=args.epochs if args.epochs is not None else 10)
+        return train(resume=args.resume, additional_epochs=args.epochs if args.epochs is not None else 10,
+                     grad_clip=args.grad_clip)
     if args.dry_run:
         return dry_run(cfg)
     return train(cfg)

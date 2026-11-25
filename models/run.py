@@ -93,14 +93,15 @@ def main():
     cfg = TrainingConfig(model_type=model_type, mode=mode, amp=amp)
     if mode == "single":
         cfg.file = choose_file(cfg.root)
-        cfg.lr, cfg.dropout, cfg.grad_clip = 3e-4, 0.0, 10.0
+        cfg.lr, cfg.dropout = 3e-4, 0.0
     if model_type == "control":
-        print("Control has no attention stack: heads/layers are recorded but do not affect computation.")
+        print("Control has no attention stack: heads and head_dim set width/bottleneck; layers are inactive.")
     while True:
         # These are the only numerical training/model settings requested interactively.
-        cfg.dim = number("dim", 512, 4)
-        cfg.conc_dim = number("conc_dim", 32)
-        cfg.heads = number("heads", 8)
+        heads = number("number of heads", 8)
+        head_dim = number("dimension per head", 64)
+        cfg.set_head_shape(heads, head_dim)
+        print(f"Derived dim={cfg.dim}, conc_dim={cfg.conc_dim}")
         cfg.layers = number("layers", 1, 0 if model_type == "control" else 1)
         cfg.epochs = number("epochs", 60 if mode == "all" else 10)
         try:

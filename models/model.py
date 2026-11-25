@@ -20,6 +20,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
+if __package__ in (None, ""):
+    from expression_features import NUM_GENE_STATS, gene_expression_statistics
+else:
+    from .expression_features import NUM_GENE_STATS, gene_expression_statistics
+
 
 def _chunked_sdpa(
     query: torch.Tensor,
@@ -81,11 +86,12 @@ class ExternalPerturbAttention(nn.Module):
     Stage 2 (gene self-attention)
         q/k/v <- cat([genes, chemical context])  (no mask)
 
-    The block does not normalise its inputs internally; it expects the caller to
-    hand it already-scaled hidden states.
+    Queries and joint gene/context features are pre-normalised when enabled.
+    Chemical states are normalised once by the parent model before the stack.
     """
 
-    def __init__(self, dim: int, num_heads: int = 8, dropout: float = 0.1):
+    def __init__(self, dim: int, num_heads: int = 8, dropout: float = 0.1,
+                 normalization: bool = True):
         super().__init__()
 
         assert dim % num_heads == 0, "dim must be divisible by num_heads"
@@ -97,6 +103,7 @@ class ExternalPerturbAttention(nn.Module):
         # --- stage 1: chemical -> gene cross attention ---
         self.kv_linear = nn.Linear(dim, dim * 2)
         self.q_linear = nn.Linear(dim, dim)
+        self.query_norm = nn.LayerNorm(dim) if normalization else nn.Identity()
 
         self.chem_ffn = nn.Sequential(
             nn.Linear(dim, dim * 4),
@@ -106,6 +113,7 @@ class ExternalPerturbAttention(nn.Module):
 
         # --- stage 2: gene -> gene self attention ---
         self.kqv = nn.Linear(dim * 2, dim * 3)
+        self.joint_norm = nn.LayerNorm(dim * 2) if normalization else nn.Identity()
 
         self.gene_ffn = nn.Sequential(
             nn.Linear(dim, dim * 4),
@@ -137,7 +145,7 @@ class ExternalPerturbAttention(nn.Module):
         key_value = self.kv_linear(chem_embeddings)
         keys, values = key_value.chunk(2, dim=-1)
 
-        queries = self.q_linear(x)
+        queries = self.q_linear(self.query_norm(x))
 
         queries = self.split_heads(queries)
         keys = self.split_heads(keys)
@@ -155,7 +163,7 @@ class ExternalPerturbAttention(nn.Module):
         chem_context = self.chem_ffn(chem_context)
 
         # --- stage 2: genes attend over genes (chemically conditioned) ---
-        qkv = self.kqv(torch.cat([x, chem_context], dim=-1))
+        qkv = self.kqv(self.joint_norm(torch.cat([x, chem_context], dim=-1)))
 
         # NOTE: chunk order is (k, q, v) exactly as in the notebook.
         keys, queries, values = qkv.chunk(3, dim=-1)
@@ -190,6 +198,9 @@ class PerturbationModel(nn.Module):
        genes. Because the kernel is a plain Gram matrix over cells it is
        invariant to cell ordering and to the number of cells.
 
+       Five per-gene statistics of the pre-L2 log-expression input are appended
+       directly at the merger, preserving expression magnitude information.
+
     2. Chemical conditioning (part 2)
        The mixed gene states are refined by ``num_layers`` stacked
        :class:`ExternalPerturbAttention` blocks, which cross-attend to the
@@ -210,14 +221,18 @@ class PerturbationModel(nn.Module):
         num_of_genes: int = 1000,
         chem_dim: int = 128,
         cell_coordi_dim: int = 2,
+        normalization: bool = True,
+        gene_statistics: bool = True,
     ):
         super().__init__()
 
         self.num_genes = num_of_genes
+        self.use_gene_statistics = gene_statistics
 
         self.gene_embedding = nn.Embedding(num_of_genes, dim)
 
         self.chem_embedding = nn.Linear(chem_dim, dim)
+        self.chem_norm = nn.LayerNorm(dim) if normalization else nn.Identity()
 
         self.layers = nn.ModuleList(
             [
@@ -225,6 +240,7 @@ class PerturbationModel(nn.Module):
                     dim=dim,
                     num_heads=num_heads,
                     dropout=dropout,
+                    normalization=normalization,
                 )
                 for _ in range(num_layers)
             ]
@@ -238,7 +254,9 @@ class PerturbationModel(nn.Module):
             nn.Linear(dim , conc_dim),
         )
 
-        self.merger = nn.Linear(dim + conc_dim, dim)
+        self.merger = nn.Linear(dim + conc_dim + (NUM_GENE_STATS if gene_statistics else 0), dim)
+        self.merger_norm = nn.LayerNorm(dim) if normalization else nn.Identity()
+        self.final_norm = nn.LayerNorm(dim) if normalization else nn.Identity()
 
         self.coordi_layer = nn.Sequential(
             nn.Linear(dim + cell_coordi_dim, dim // 2),
@@ -271,7 +289,8 @@ class PerturbationModel(nn.Module):
         Returns (B, C, G) predicted expression.
         """
         # --- unit-normalise each gene's expression profile over the cell axis ---
-        mean_value = control_cell_line.mean(axis=1)
+        # Preserve magnitude summaries before the cosine pathway removes scale.
+        statistics = gene_expression_statistics(control_cell_line) if self.use_gene_statistics else None
         gene_norms = torch.linalg.norm(control_cell_line, dim=-1, keepdim=True)
         control_cell_line = control_cell_line / gene_norms.clamp_min(1e-12)
 
@@ -285,7 +304,8 @@ class PerturbationModel(nn.Module):
             .expand(batch_size, -1, -1)
         )
 
-        chem_embeddings = self.chem_embedding(chem)
+        # Fixed chemical tokens are normalised once and reused by all blocks.
+        chem_embeddings = self.chem_norm(self.chem_embedding(chem))
 
         # --- part 1: co-expression context via cosine kernel ---
         # Keys/values live in the raw (C-dim) expression space; only the values
@@ -303,13 +323,18 @@ class PerturbationModel(nn.Module):
 
         coexpression_context = self.conc_ffn(coexpression_context)
 
-        gene_states = self.merger(
-            torch.cat([gene_embeddings, coexpression_context], dim=-1)
-        )
+        merger_inputs = [gene_embeddings, coexpression_context]
+        if statistics is not None:
+            merger_inputs.append(statistics)
+        gene_states = self.merger(torch.cat(merger_inputs, dim=-1))
+
+        gene_states = self.merger_norm(gene_states)
 
         # --- part 2: chemical-conditioned layer stack ---
         for layer in self.layers:
             gene_states = layer(gene_states, chem_embeddings, chem_mask)
+
+        gene_states = self.final_norm(gene_states)
 
         # --- part 3: coordinate-conditioned readout ---
         if readout_chunk is None:

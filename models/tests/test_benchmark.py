@@ -68,24 +68,39 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_sweep_continues_after_oom_and_reports_frontier(self):
         output = self.fixture.root / "report"
-        results = [dict(dim=16, layers=1, status="oom"), dict(dim=16, layers=2, status="fits"),
-                   dict(dim=32, layers=1, status="fits"), dict(dim=32, layers=2, status="tight")]
+        results = [dict(dim=32, head_dim=16, layers=1, status="oom"), dict(dim=32, head_dim=16, layers=2, status="fits"),
+                   dict(dim=64, head_dim=32, layers=1, status="fits"), dict(dim=64, head_dim=32, layers=2, status="tight")]
         with patch("models.benchmark.isolated_trial", side_effect=results) as worker:
             rows = sweep(self.config(model_type="full"), [16, 32], [1, 2], output=output)
         self.assertEqual(worker.call_count, 4)
+        for call in worker.call_args_list:
+            candidate = call.args[0]
+            self.assertEqual(candidate.dim, candidate.heads * candidate.head_dim)
+            self.assertEqual(candidate.conc_dim, candidate.head_dim)
+            self.assertEqual(candidate.grad_clip, 3.)
         self.assertEqual(len(rows), 4)
         summary = json.loads((output / "summary.json").read_text())
         self.assertEqual(summary["status"], "finished")
-        self.assertEqual(summary["largest_fitting_dim_by_layers"], {"1": 32, "2": 16})
+        self.assertEqual(summary["largest_fitting_dim_by_layers"], {"1": 64, "2": 32})
         with (output / "results.csv").open(newline="") as fh:
             self.assertEqual(len(list(csv.DictReader(fh))), 4)
         with self.assertRaises(FileExistsError):
             sweep(self.config(), [16], [1], output=output)
 
     def test_control_layers_are_not_repeated(self):
-        with patch("models.benchmark.isolated_trial", return_value=dict(dim=16, layers=1, status="fits")) as worker:
+        with patch("models.benchmark.isolated_trial", return_value=dict(dim=32, head_dim=16, layers=1, status="fits")) as worker:
             sweep(self.config(), [16], [1, 2, 3], output=self.fixture.root / "control_report")
         worker.assert_called_once()
+
+    def test_benchmark_cli_uses_per_head_ranges(self):
+        from models.benchmark import parse_args
+        _, args = parse_args(["--heads", "8", "--head-dim-start", "32",
+                              "--head-dim-end", "128", "--head-dim-step", "32",
+                              "--layers-start", "1", "--layers-end", "3"])
+        self.assertEqual((args.heads, args.head_dim_start, args.head_dim_end, args.head_dim_step),
+                         (8, 32, 128, 32))
+        self.assertFalse(hasattr(args, "conc_dim"))
+        self.assertFalse(hasattr(args, "dim_start"))
 
     def test_gradient_csv_uses_eight_decimal_places_only_for_gradients(self):
         path = self.fixture.root / "log.csv"

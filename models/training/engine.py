@@ -10,8 +10,9 @@ import numpy as np
 import torch
 from tqdm.auto import tqdm
 
+from models.expression_features import GENE_STAT_NAMES
 from models.tahoe_data import FileCache
-from models.training.checkpoints import (create_run, load_checkpoint, restore_rng,
+from models.training.checkpoints import (SCHEMA_VERSION, create_run, load_checkpoint, restore_rng,
                                           save_checkpoint, write_json)
 from models.training.config import TrainingConfig
 from models.training.data import (DataPlan, epoch_units, make_plan, sample_example,
@@ -85,7 +86,7 @@ def dry_run(cfg):
         cache.close()
 
 
-def train(cfg=None, *, resume="", additional_epochs=None):
+def train(cfg=None, *, resume="", additional_epochs=None, grad_clip=None):
     """Start a fresh run, or restore the saved configuration and add epochs.
 
     A unit ends with one optimizer update. Checkpoints are written only at unit
@@ -96,6 +97,8 @@ def train(cfg=None, *, resume="", additional_epochs=None):
     if resume:
         run_dir, state = load_checkpoint(resume)
         cfg = TrainingConfig(**state["config"])
+        # Keep the saved architecture, but use the current requested clipping policy.
+        cfg.grad_clip = TrainingConfig().grad_clip if grad_clip is None else grad_clip
         if additional_epochs is None or additional_epochs <= 0:
             raise ValueError("Specify a positive number of additional epochs")
         progress = state["progress"]
@@ -115,7 +118,7 @@ def train(cfg=None, *, resume="", additional_epochs=None):
                 candidate = Path(cfg.root) / candidate
             cfg.file = str(candidate.resolve())
         run_dir = create_run(cfg.model_type)
-        info = {"schema_version": 1, "run": run_dir.name,
+        info = {"schema_version": SCHEMA_VERSION, "run": run_dir.name,
                 "created": datetime.now().isoformat(timespec="seconds"),
                 "status": "indexing", "config": cfg.to_dict(), "epochs": []}
         write_json(run_dir / "info.json", info)
@@ -143,18 +146,20 @@ def train(cfg=None, *, resume="", additional_epochs=None):
             optimizer.load_state_dict(state["optimizer"])
             restore_rng(state, rng)
         groups = parameter_counts(model)
-        info.update(status="running", config=cfg.to_dict(), data=plan.to_dict(),
+        info.update(schema_version=SCHEMA_VERSION, status="running", config=cfg.to_dict(), data=plan.to_dict(),
                     model={"n_genes": plan.n_genes, "chem_dim": chem_dim,
                            "parameters": groups, "parameter_total": sum(groups.values()),
-                           "uses_attention_stack": cfg.model_type == "full"},
+                           "uses_attention_stack": cfg.model_type == "full",
+                           "normalization": cfg.normalization,
+                           "gene_statistics": list(GENE_STAT_NAMES) if cfg.gene_statistics else []},
                     device=str(device), target_epochs=cfg.epochs)
         write_json(run_dir / "info.json", info)
         write_json(run_dir / "config.json", cfg.to_dict())
         print(f"Run: {run_dir}\nModel: {cfg.model_type}; mode: {cfg.mode}; "
               f"train cell lines: {len(plan.train_lines)}; validation lines: {plan.val_lines}; "
-              f"genes: {plan.n_genes}; parameters: {sum(groups.values()):,}")
+              f"genes: {plan.n_genes}; parameters: {sum(groups.values()):,}; normalization: {cfg.normalization}")
         if cfg.model_type == "control":
-            print("DMSO-only reconstruction. heads/layers/dropout do not alter the control architecture.")
+            print("DMSO-only reconstruction. Head sizing sets width/bottleneck; layers/dropout are inactive.")
         cache = FileCache(cfg.file_cache)
         log = PassLog(run_dir / "log.csv", groups, progress["backward_pass"])
 
