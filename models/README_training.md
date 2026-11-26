@@ -203,8 +203,8 @@ python models/benchmark.py --file plate6_CVCL_1125.h5ad --heads 8 --head-dim-sta
 Both ranges use inclusive bounds (the end is tested if aligned with the step).
 `--layers-step` defaults to 1. Heads default to 8 when prompted. For every
 candidate, `dim = heads * head_dim` and `conc_dim = head_dim`; neither total dim
-nor conc_dim is requested. Full-model candidates with `head_dim > 128` are
-recorded as `invalid` because of the existing attention-kernel constraint.
+nor conc_dim is requested. There is no fixed cap on `head_dim`; candidates
+are checked against actual runtime and GPU memory capacity.
 
 Each shape runs in a fresh subprocess using actual cells, all genes in the file,
 chemical tokens, the same chunk sizes and precision as training, and the full

@@ -351,8 +351,11 @@ class PipelineTests(unittest.TestCase):
             cfg.validate()
         with self.assertRaises(ValueError):
             TrainingConfig(heads=0, head_dim=8)
-        with self.assertRaises(ValueError):
-            TrainingConfig(heads=8, head_dim=129).validate()
+        wide = TrainingConfig(heads=8, head_dim=150)
+        wide.validate()
+        self.assertEqual((wide.dim, wide.conc_dim), (1200, 150))
+        with self.assertRaisesRegex(ValueError, "divisible by heads"):
+            TrainingConfig(dim=1201, heads=8).validate()
 
     def test_derived_head_shapes_train_and_save_for_both_models(self):
         for model_type in ("control", "full"):

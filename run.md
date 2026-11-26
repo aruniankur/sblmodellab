@@ -144,7 +144,7 @@ dim = heads * head_dim
 conc_dim = head_dim
 ```
 
-Gene count comes from the data; chemical feature width comes from the cache. Full-model head dimensions must be at most 128. In the control model, heads and head dimension set widths, but the layer-count and dropout settings do not create an attention stack.
+Gene count comes from the data; chemical feature width comes from the cache. There is no fixed cap on dimension per head; total dimension must be divisible by the number of heads. In the control model, heads and head dimension set widths, but the layer-count and dropout settings do not create an attention stack.
 
 For an existing run, enter how many **additional** epochs to train.
 

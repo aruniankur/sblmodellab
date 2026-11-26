@@ -73,8 +73,8 @@ class TrainingConfig:
             raise ValueError("dim must equal heads * head_dim and conc_dim must equal head_dim")
         if self.dim < 4 or self.layers < 0:
             raise ValueError("dim must be >= 4 and layers must be >= 0")
-        if self.model_type == "full" and (self.dim % self.heads or self.dim // self.heads > 128):
-            raise ValueError("dim must be divisible by heads and dim / heads must be <= 128")
+        if self.model_type == "full" and self.dim % self.heads:
+            raise ValueError("dim must be divisible by heads")
         if self.model_type == "full" and self.layers < 1:
             raise ValueError("The full model needs at least one perturbation layer")
         if not isinstance(self.gene_residual, bool):
