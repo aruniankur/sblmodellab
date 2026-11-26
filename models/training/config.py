@@ -37,6 +37,7 @@ class TrainingConfig:
     dropout: float = 0.1
     normalization: str = "layernorm"
     gene_statistics: bool = True
+    attention_normalization: bool = True
     gene_residual: bool = True
     scale_exponent: float = 0.5
     amp: str = "bf16"

@@ -151,6 +151,7 @@ def train(cfg=None, *, resume="", additional_epochs=None, grad_clip=None):
                            "parameters": groups, "parameter_total": sum(groups.values()),
                            "uses_attention_stack": cfg.model_type == "full",
                            "normalization": cfg.normalization,
+                           "attention_normalization": cfg.attention_normalization if cfg.model_type == "full" else False,
                            "gene_residual": cfg.gene_residual,
                            "gene_statistics": list(GENE_STAT_NAMES) if cfg.gene_statistics else []},
                     device=str(device), target_epochs=cfg.epochs)

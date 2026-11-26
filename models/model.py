@@ -88,10 +88,12 @@ class ExternalPerturbAttention(nn.Module):
 
     Queries and joint gene/context features are pre-normalised when enabled.
     Chemical states are normalised once by the parent model before the stack.
+    Separate Q/K/V projections are normalised over dim before splitting heads;
+    chemical and gene FFN outputs are normalised before fusion/residual addition.
     """
 
     def __init__(self, dim: int, num_heads: int = 8, dropout: float = 0.1,
-                 normalization: bool = True):
+                 normalization: bool = True, attention_normalization: bool = True):
         super().__init__()
 
         assert dim % num_heads == 0, "dim must be divisible by num_heads"
@@ -99,6 +101,17 @@ class ExternalPerturbAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.dropout = dropout
+
+        # Separate full-width norms after projections and FFNs, before head splitting.
+        norm = lambda: nn.LayerNorm(dim) if normalization and attention_normalization else nn.Identity()
+        self.chem_q_norm = norm()
+        self.chem_k_norm = norm()
+        self.chem_v_norm = norm()
+        self.chem_ffn_norm = norm()
+        self.gene_q_norm = norm()
+        self.gene_k_norm = norm()
+        self.gene_v_norm = norm()
+        self.gene_ffn_norm = norm()
 
         # --- stage 1: chemical -> gene cross attention ---
         self.kv_linear = nn.Linear(dim, dim * 2)
@@ -145,7 +158,9 @@ class ExternalPerturbAttention(nn.Module):
         key_value = self.kv_linear(chem_embeddings)
         keys, values = key_value.chunk(2, dim=-1)
 
-        queries = self.q_linear(self.query_norm(x))
+        queries = self.chem_q_norm(self.q_linear(self.query_norm(x)))
+        keys = self.chem_k_norm(keys)
+        values = self.chem_v_norm(values)
 
         queries = self.split_heads(queries)
         keys = self.split_heads(keys)
@@ -160,13 +175,16 @@ class ExternalPerturbAttention(nn.Module):
         )
 
         chem_context = self.merge_heads(chem_context)
-        chem_context = self.chem_ffn(chem_context)
+        chem_context = self.chem_ffn_norm(self.chem_ffn(chem_context))
 
         # --- stage 2: genes attend over genes (chemically conditioned) ---
         qkv = self.kqv(self.joint_norm(torch.cat([x, chem_context], dim=-1)))
 
         # NOTE: chunk order is (k, q, v) exactly as in the notebook.
         keys, queries, values = qkv.chunk(3, dim=-1)
+        keys = self.gene_k_norm(keys)
+        queries = self.gene_q_norm(queries)
+        values = self.gene_v_norm(values)
 
         keys = self.split_heads(keys)
         queries = self.split_heads(queries)
@@ -180,9 +198,9 @@ class ExternalPerturbAttention(nn.Module):
         )
 
         gene_context = self.merge_heads(gene_context)
-        gene_context = self.gene_ffn(gene_context)
+        gene_context = self.gene_ffn_norm(self.gene_ffn(gene_context) + x)
 
-        return gene_context + x
+        return gene_context
 
 
 class PerturbationModel(nn.Module):
@@ -225,6 +243,7 @@ class PerturbationModel(nn.Module):
         normalization: bool = True,
         gene_statistics: bool = True,
         gene_residual: bool = True,
+        attention_normalization: bool = True,
     ):
         super().__init__()
 
@@ -244,6 +263,7 @@ class PerturbationModel(nn.Module):
                     num_heads=num_heads,
                     dropout=dropout,
                     normalization=normalization,
+                    attention_normalization=attention_normalization,
                 )
                 for _ in range(num_layers)
             ]

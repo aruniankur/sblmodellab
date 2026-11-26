@@ -202,7 +202,9 @@ class PipelineTests(unittest.TestCase):
             if model_type == "full":
                 expected |= {"chem_norm", "final_norm"}
                 expected |= {f"layers.{i}.{name}" for i in range(2)
-                             for name in ("query_norm", "joint_norm")}
+                             for name in ("query_norm", "joint_norm",
+                                          "chem_q_norm", "chem_k_norm", "chem_v_norm", "chem_ffn_norm",
+                                          "gene_q_norm", "gene_k_norm", "gene_v_norm", "gene_ffn_norm")}
             self.assertEqual(set(norms), expected)
             for name, module in norms.items():
                 self.assertEqual(module.normalized_shape, (32,) if name.endswith("joint_norm") else (16,))
@@ -262,7 +264,7 @@ class PipelineTests(unittest.TestCase):
             model.load_state_dict(restored["model"], strict=True)
             train(resume=str(run), additional_epochs=1)
         _, resumed = load_checkpoint(run)
-        self.assertEqual(resumed["schema_version"], 4)
+        self.assertEqual(resumed["schema_version"], 5)
         self.assertEqual(resumed["config"]["normalization"], "none")
         self.assertEqual(resumed["progress"]["epoch"], 2)
         self.assertFalse(any("norm." in key for key in resumed["model"]))
@@ -280,7 +282,7 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(restored["model"]["merger.weight"].shape[1], 20)
             train(resume=str(run), additional_epochs=1)
         _, resumed = load_checkpoint(run)
-        self.assertEqual(resumed["schema_version"], 4)
+        self.assertEqual(resumed["schema_version"], 5)
         self.assertFalse(resumed["config"]["gene_statistics"])
         self.assertEqual(resumed["model"]["merger.weight"].shape[1], 20)
         self.assertEqual(resumed["progress"]["epoch"], 2)
