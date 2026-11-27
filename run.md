@@ -160,7 +160,7 @@ This is a suggested starting candidate, not a measured memory guarantee for your
 | Derived `conc_dim` | 128 |
 | Perturbation layers | 4 |
 | Initial epochs | 10 |
-| DMSO context cells | 256 |
+| DMSO context cells | 512 |
 | Target cells | 128 |
 | Learning rate | 0.0001 |
 | Gradient clipping | 3 |
@@ -265,7 +265,7 @@ New runs enable LayerNorm, five log-expression statistics and the gene residual:
 gene_states = LayerNorm(merger(features) + gene_embeddings)
 ```
 
-Current checkpoints use schema 4. Older supported checkpoints preserve their original architecture when settings are absent, including a disabled gene residual. Starting a new run uses the current defaults; resuming does not silently upgrade an older architecture.
+Current checkpoints use schema 8. Older supported checkpoints preserve their original architecture when settings are absent, including a disabled gene residual. New full-model runs also use `chem_context = LayerNorm(chem_context + chem_ffn(chem_context))`. Schema-5 and older checkpoints keep this chemical FFN residual disabled when its setting is absent. Starting a new run uses the current defaults; resuming does not silently upgrade an older architecture.
 
 ## 9. Understand saved files and progress
 
@@ -295,7 +295,7 @@ Full all-file training holds out two eligible cell lines and evaluates their fir
 
 The loss is squared error summed over genes, averaged over cells/examples and divided by `num_genes ** 0.5`. Compare runs only when the loss definition, gene panel and evaluation samples are compatible.
 
-Gradient columns use eight decimal places and report each backward pass's contribution **before clipping**, with accumulation averaging undone. They are not the actual accumulated optimizer-step norm, so counting rows above 3 does not give the clipping rate. CSV formatting does not change tensor precision. There is no TensorBoard dependency; use tqdm and the dashboard.
+Gradient columns use eight decimal places and report each backward pass's contribution **before clipping**, with accumulation averaging undone. They are not the actual accumulated optimizer-step norm, so counting rows above 3 does not give the clipping rate. CSV formatting does not change tensor precision. The tqdm display and each CSV row also report `t_mean_loss` (the sampled target cells’ per-gene mean repeated across targets) and `i_mean_loss` (the sampled input DMSO cells’ per-gene mean). Both use the same loss formula and scale as `loss`; they are logging-only comparisons. `t_mean_loss` uses target data and is an optimistic constant-prediction reference. When resuming old logs, historical rows keep these fields blank; new rows include both values. There is no TensorBoard dependency; use tqdm and the dashboard.
 
 ## 10. Live dashboard in a second terminal
 
@@ -412,7 +412,7 @@ These chunks bound cosine-context and readout memory. They do not chunk the full
 
 Useful defaults: weight decay `0.01`, gradient clipping `3`, scale exponent `0.5`, query chunk `4096`, readout chunk `16`, and seed `0`.
 
-For new-run architecture ablations, training accepts `--no-gene-residual`, `--no-gene-stats` and `--normalization none`. All are opt-in departures from the current defaults. Do not use these flags with resume.
+For new-run architecture ablations, training accepts `--no-chem-ffn-residual`, `--no-gene-residual`, `--no-gene-stats` and `--normalization none`. All are opt-in departures from the current defaults. Do not use these flags with resume.
 
 ## 14. Checks and code reference
 
@@ -440,3 +440,5 @@ python zipfolder.py --help
 ```
 
 Core code lives under `models/`; the dashboard is under `UIeval/`. See `models/README_training.md` for implementation details and `models/model_flow.mmd` for the architecture diagram. There is no standalone inference CLI documented here; training checkpoints require the matching model architecture and input preparation for custom prediction code.
+
+New full-model runs use `ffn_multiplier=2` and `joint_normalization=False`. These settings are saved explicitly. Older checkpoint widths and joint-norm placement are inferred from saved weights when absent. Use a new run for the current architecture.

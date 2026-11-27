@@ -142,7 +142,7 @@ def parse_args(argv=None):
     parser.add_argument("--amp", choices=("off", "bf16"), default=None)
     parser.add_argument("--query-chunk", type=int, default=4096)
     parser.add_argument("--readout-chunk", type=int, default=16)
-    parser.add_argument("--n-control", type=int, default=256)
+    parser.add_argument("--n-control", type=int, default=512)
     parser.add_argument("--n-target", type=int, default=128)
     parser.add_argument("--min-cells", type=int, default=128)
     parser.add_argument("--batches-per-unit", type=int, default=2)

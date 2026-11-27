@@ -11,7 +11,7 @@ import torch
 
 from models.training.config import TRAINED_ROOT
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 8
 
 
 def write_json(path, value):
@@ -44,7 +44,7 @@ def checkpoint_path(value):
 def load_checkpoint(value):
     path = checkpoint_path(value)
     state = torch.load(path, map_location="cpu", weights_only=False)
-    if state.get("schema_version") not in (1, 2, 3, 4, SCHEMA_VERSION):
+    if state.get("schema_version") not in (1, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION):
         raise ValueError("This checkpoint predates the organized pipeline; start a new run")
     if state["schema_version"] == 1:
         # Older runs have no norm parameters or matching optimizer/CSV groups.
@@ -66,6 +66,29 @@ def load_checkpoint(value):
         state["config"].setdefault("attention_normalization", False)
     elif "attention_normalization" not in state["config"]:
         raise ValueError("Checkpoint is missing its attention-normalization architecture setting")
+    if state["schema_version"] < 6:
+        # This residual changes behavior without adding parameter tensors.
+        state["config"].setdefault("chem_ffn_residual", False)
+    elif "chem_ffn_residual" not in state["config"]:
+        raise ValueError("Checkpoint is missing its chemical-FFN-residual architecture setting")
+    if state["schema_version"] < 8:
+        # Earlier configs did not record FFN width / joint-norm placement.
+        # Infer from tensors, including experimental older-schema checkpoints.
+        weights = state.get("model", {})
+        first_ffn = weights.get("layers.0.chem_ffn.0.weight")
+        gene_ffn = weights.get("layers.0.gene_ffn.0.weight")
+        if first_ffn is not None:
+            width = first_ffn.shape[1]
+            if first_ffn.shape[0] % width or (gene_ffn is not None and gene_ffn.shape != first_ffn.shape):
+                raise ValueError("Checkpoint has inconsistent chemical/gene FFN widths")
+            inferred_multiplier = first_ffn.shape[0] // width
+        else:
+            inferred_multiplier = 4
+        state["config"].setdefault("ffn_multiplier", inferred_multiplier)
+        has_joint_norm = any(key.startswith("layers.") and ".joint_norm." in key for key in weights)
+        state["config"].setdefault("joint_normalization", has_joint_norm if weights else True)
+    elif "ffn_multiplier" not in state["config"] or "joint_normalization" not in state["config"]:
+        raise ValueError("Checkpoint is missing FFN-width or joint-normalization architecture settings")
     return path.parent, state
 
 

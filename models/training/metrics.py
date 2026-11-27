@@ -8,6 +8,7 @@ from pathlib import Path
 
 # CSV is text: limit gradient display precision without changing training tensors.
 GRADIENT_DECIMAL_PLACES = 8
+MEAN_LOSS_FIELDS = ("t_mean_loss", "i_mean_loss")
 
 
 def parameter_group(name):
@@ -47,15 +48,18 @@ class PassLog:
         self.path = Path(path)
         self.fields = ["epoch", "unit", "optimizer_step", "backward_pass", "micro_batch",
                        "accumulation_count", "file", "plate", "cell_line", "control_sample",
-                       "target_sample", "drug", "dose", "loss", "backward_loss", "grad_total",
+                       "target_sample", "drug", "dose", "loss", *MEAN_LOSS_FIELDS, "backward_loss", "grad_total",
                        "seconds", "peak_vram_gb"] + [f"grad_{key}" for key in groups]
         if self.path.exists():
             # Drop rows newer than the checkpoint after a crash. Never duplicate steps.
             tmp = self.path.with_suffix(".csv.tmp")
             with self.path.open(newline="", encoding="utf-8") as src, tmp.open("w", newline="", encoding="utf-8") as dst:
                 reader = csv.DictReader(src)
-                if reader.fieldnames != self.fields:
+                legacy_fields = [field for field in self.fields if field not in MEAN_LOSS_FIELDS]
+                if reader.fieldnames not in (self.fields, legacy_fields):
                     raise ValueError("CSV schema differs from saved model parameter groups")
+                # Schema <= 6 did not log means. Keep historical values intact;
+                # DictWriter fills the new columns with blanks for those rows.
                 writer = csv.DictWriter(dst, fieldnames=self.fields)
                 writer.writeheader()
                 for row in reader:

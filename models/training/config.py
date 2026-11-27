@@ -22,8 +22,10 @@ class TrainingConfig:
     heads: int = 8
     head_dim: int | None = None  # None preserves the architecture of legacy checkpoints
     layers: int = 1
+    ffn_multiplier: int = 2
+    joint_normalization: bool = False
     epochs: int = 60
-    n_control: int = 256
+    n_control: int = 512
     n_target: int = 128
     min_cells: int = 128
     passes_per_cell_line: int = 5
@@ -37,6 +39,7 @@ class TrainingConfig:
     dropout: float = 0.1
     normalization: str = "layernorm"
     gene_statistics: bool = True
+    chem_ffn_residual: bool = True
     attention_normalization: bool = True
     gene_residual: bool = True
     scale_exponent: float = 0.5
@@ -77,6 +80,12 @@ class TrainingConfig:
             raise ValueError("dim must be divisible by heads")
         if self.model_type == "full" and self.layers < 1:
             raise ValueError("The full model needs at least one perturbation layer")
+        if isinstance(self.ffn_multiplier, bool) or not isinstance(self.ffn_multiplier, int) or self.ffn_multiplier < 1:
+            raise ValueError("ffn_multiplier must be a positive integer")
+        if not isinstance(self.joint_normalization, bool):
+            raise ValueError("joint_normalization must be a boolean")
+        if not isinstance(self.chem_ffn_residual, bool):
+            raise ValueError("chem_ffn_residual must be a boolean")
         if not isinstance(self.gene_residual, bool):
             raise ValueError("gene_residual must be a boolean")
         if not isinstance(self.gene_statistics, bool):
@@ -109,7 +118,7 @@ def parse_args(argv=None, *, single=False):
     parser.add_argument("--file", default=None)
     parser.add_argument("--resume", default="", help="Run folder or last.pt; --epochs adds epochs")
     parser.add_argument("--dry-run", action="store_true", help="Inspect selection and one batch; no run saved")
-    for flag in ("head-dim", "heads", "layers", "epochs", "n-control", "n-target",
+    for flag in ("head-dim", "heads", "layers", "ffn-multiplier", "epochs", "n-control", "n-target",
                  "min-cells", "passes-per-cell-line", "batches-per-unit", "file-cache",
                  "val-cell-lines", "val-plates", "query-chunk", "readout-chunk", "seed",
                  "save-every", "max-steps", "max-units-per-epoch"):
@@ -121,8 +130,12 @@ def parse_args(argv=None, *, single=False):
     parser.add_argument("--atom-cache", default=None)
     parser.add_argument("--normalization", choices=("layernorm", "none"), default=None,
                         help="new-run normalization; none enables an architecture ablation")
+    parser.add_argument("--joint-normalization", action="store_true", default=None,
+                        help="new-run ablation: normalize concatenated gene/chemical features before KQV")
     parser.add_argument("--no-gene-stats", dest="gene_statistics", action="store_false", default=None,
                         help="new-run ablation: omit the five log-expression statistics")
+    parser.add_argument("--no-chem-ffn-residual", dest="chem_ffn_residual", action="store_false", default=None,
+                        help="new-run ablation: disable the chemical attention FFN residual")
     parser.add_argument("--no-gene-residual", dest="gene_residual", action="store_false", default=None,
                         help="new-run ablation: disable the gene embedding residual")
     args = parser.parse_args(argv)

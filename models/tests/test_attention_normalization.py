@@ -32,7 +32,7 @@ class AttentionNormalizationTests(unittest.TestCase):
         with patch("models.model.F.scaled_dot_product_attention", side_effect=capture):
             out = block(x, chem)
         handle.remove()
-        vectors = attention_inputs + [joint_inputs[0][..., 16:], out - x]
+        vectors = attention_inputs + [joint_inputs[0][..., 16:], out]
         self.assertEqual(len(attention_inputs), 6)
         for value in vectors:
             torch.testing.assert_close(value.mean(-1), torch.zeros_like(value[..., 0]), atol=2e-6, rtol=0)
@@ -40,7 +40,7 @@ class AttentionNormalizationTests(unittest.TestCase):
 
     def test_schema_four_full_model_keeps_original_parameter_keys(self):
         cfg = TrainingConfig(dim=16, conc_dim=4, heads=2, layers=1,
-                             attention_normalization=False)
+                             attention_normalization=False, chem_ffn_residual=False)
         model = create_model(cfg, 7, 5)
         config = cfg.to_dict()
         config.pop("attention_normalization")

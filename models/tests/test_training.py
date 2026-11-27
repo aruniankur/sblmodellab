@@ -146,11 +146,46 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual([int(r["backward_pass"]) for r in rows], [1, 2, 3, 4])
             self.assertTrue(all(r["drug"] == "DMSO_TF" for r in rows))
             self.assertIn("grad_gene_embedding", rows[0])
+            for row in rows:
+                self.assertTrue(np.isfinite(float(row["t_mean_loss"])))
+                self.assertTrue(np.isfinite(float(row["i_mean_loss"])))
+                self.assertLessEqual(float(row["t_mean_loss"]), float(row["i_mean_loss"]) + 1e-5)
             self.assertTrue(all(np.isfinite(float(r["grad_total"])) for r in rows))
             no_cache.assert_not_called()
             self.assertTrue(run.name.endswith("_control"))
             self.assertTrue((run / "info.json").exists())
             self.assertFalse((run / "grad.csv").exists())
+
+    def test_resume_old_csv_adds_mean_losses_and_tqdm_shows_them(self):
+        import io
+        from contextlib import redirect_stderr
+        stream = io.StringIO()
+        with patch("models.training.checkpoints.TRAINED_ROOT", self.root / "runs"), redirect_stderr(stream):
+            run = train(self.cfg(max_steps=1))
+            path = run / "log.csv"
+            with path.open(newline="") as fh:
+                reader = csv.DictReader(fh)
+                fields = [f for f in reader.fieldnames if f not in ("t_mean_loss", "i_mean_loss")]
+                old_rows = [{k: v for k, v in row.items() if k in fields} for row in reader]
+            with path.open("w", newline="") as fh:
+                writer = csv.DictWriter(fh, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(old_rows)
+                writer.writerow({**old_rows[-1], "backward_pass": "999"})
+            state = torch.load(run / "last.pt", map_location="cpu", weights_only=False)
+            state["schema_version"] = 6
+            torch.save(state, run / "last.pt")
+            train(resume=str(run), additional_epochs=1)
+        with path.open(newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        self.assertEqual([int(r["backward_pass"]) for r in rows], [1, 2, 3, 4])
+        self.assertTrue(all(r["t_mean_loss"] == r["i_mean_loss"] == "" for r in rows[:2]))
+        self.assertTrue(all(np.isfinite(float(r[k])) for r in rows[2:]
+                            for k in ("t_mean_loss", "i_mean_loss")))
+        self.assertIn("t_mean_loss=", stream.getvalue())
+        self.assertIn("i_mean_loss=", stream.getvalue())
+        _, state = load_checkpoint(run)
+        self.assertEqual(state["schema_version"], 8)
 
     def test_full_single_training_and_additional_epoch_resume(self):
         cfg = self.cfg(model_type="full", mode="single", file=str(self.data / "plate1_A.h5ad"))
@@ -202,7 +237,7 @@ class PipelineTests(unittest.TestCase):
             if model_type == "full":
                 expected |= {"chem_norm", "final_norm"}
                 expected |= {f"layers.{i}.{name}" for i in range(2)
-                             for name in ("query_norm", "joint_norm",
+                             for name in ("query_norm",
                                           "chem_q_norm", "chem_k_norm", "chem_v_norm", "chem_ffn_norm",
                                           "gene_q_norm", "gene_k_norm", "gene_v_norm", "gene_ffn_norm")}
             self.assertEqual(set(norms), expected)
@@ -264,7 +299,7 @@ class PipelineTests(unittest.TestCase):
             model.load_state_dict(restored["model"], strict=True)
             train(resume=str(run), additional_epochs=1)
         _, resumed = load_checkpoint(run)
-        self.assertEqual(resumed["schema_version"], 5)
+        self.assertEqual(resumed["schema_version"], 8)
         self.assertEqual(resumed["config"]["normalization"], "none")
         self.assertEqual(resumed["progress"]["epoch"], 2)
         self.assertFalse(any("norm." in key for key in resumed["model"]))
@@ -282,7 +317,7 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(restored["model"]["merger.weight"].shape[1], 20)
             train(resume=str(run), additional_epochs=1)
         _, resumed = load_checkpoint(run)
-        self.assertEqual(resumed["schema_version"], 5)
+        self.assertEqual(resumed["schema_version"], 8)
         self.assertFalse(resumed["config"]["gene_statistics"])
         self.assertEqual(resumed["model"]["merger.weight"].shape[1], 20)
         self.assertEqual(resumed["progress"]["epoch"], 2)
@@ -341,6 +376,7 @@ class PipelineTests(unittest.TestCase):
         _, cfg = parse_args(["--heads", "8", "--head-dim", "128"])
         self.assertEqual((cfg.dim, cfg.conc_dim, cfg.head_dim), (1024, 128, 128))
         self.assertEqual(cfg.grad_clip, 3.)
+        self.assertEqual((cfg.n_control, cfg.n_target), (512, 128))
         _, single = parse_args(["--model", "control", "--heads", "4", "--head-dim", "16",
                                 "--file", str(self.data / "plate1_A.h5ad")], single=True)
         self.assertEqual((single.dim, single.conc_dim, single.grad_clip), (64, 16, 3.))

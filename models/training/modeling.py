@@ -16,7 +16,9 @@ def create_model(cfg, n_genes, chem_dim=None):
         return ControlPerturbationModel(**kwargs)
     if chem_dim is None:
         raise ValueError("Chemical feature width must be inferred from the token cache")
-    return PerturbationModel(chem_dim=chem_dim, attention_normalization=cfg.attention_normalization, **kwargs)
+    return PerturbationModel(chem_dim=chem_dim, attention_normalization=cfg.attention_normalization,
+                             chem_ffn_residual=cfg.chem_ffn_residual, ffn_multiplier=cfg.ffn_multiplier,
+                             joint_normalization=cfg.joint_normalization, **kwargs)
 
 
 def load_chemistry(cfg):
@@ -42,3 +44,21 @@ def loss_for(model, example, cfg, device, store=None):
         predicted = predict(model, example, cfg, device, store)
     target = example.target.unsqueeze(0).to(device)
     return perturbation_loss(predicted.float(), target, cfg.scale_exponent)
+
+
+@torch.no_grad()
+def mean_baseline_losses(example, cfg):
+    """Comparable per-well constant predictions, using pre-L2 log expression.
+
+    t_mean_loss uses the sampled target cells' per-gene mean (an oracle
+    constant-prediction reference). i_mean_loss uses the sampled input DMSO
+    cells' per-gene mean. Neither baseline participates in optimization.
+    """
+    target = example.target.detach().float().unsqueeze(0)
+    with torch.autocast(device_type=target.device.type, enabled=False):
+        target_mean = target.mean(dim=1, keepdim=True).expand_as(target)
+        input_mean = example.control.detach().float().mean(dim=-1)
+        input_mean = input_mean.to(target.device)[None, None, :].expand_as(target)
+        t_mean_loss = perturbation_loss(target_mean, target, cfg.scale_exponent)
+        i_mean_loss = perturbation_loss(input_mean, target, cfg.scale_exponent)
+    return float(t_mean_loss), float(i_mean_loss)

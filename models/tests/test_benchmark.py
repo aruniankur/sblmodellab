@@ -99,6 +99,7 @@ class BenchmarkTests(unittest.TestCase):
                               "--layers-start", "1", "--layers-end", "3"])
         self.assertEqual((args.heads, args.head_dim_start, args.head_dim_end, args.head_dim_step),
                          (8, 32, 128, 32))
+        self.assertEqual((args.n_control, args.n_target), (512, 128))
         self.assertFalse(hasattr(args, "conc_dim"))
         self.assertFalse(hasattr(args, "dim_start"))
 

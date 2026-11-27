@@ -28,6 +28,12 @@ The control model also uses these derived widths, but has no attention stack,
 so `layers` and `dropout` do not affect its computation. Existing checkpoints
 retain their original widths and bottleneck, even if they predate this sizing rule.
 
+New full-model runs enable a chemical FFN residual in every attention block:
+`chem_context = chem_ffn_norm(chem_context + chem_ffn(chem_context))`.
+The setting is saved as `chem_ffn_residual`; checkpoints from schema 5 or older
+resume with their original behavior. Use `--no-chem-ffn-residual` for a new-run
+ablation. The residual adds no parameters, but changes the forward computation.
+
 ## Two models, two training modes
 
 | Model | Context | Target | Extra input |
@@ -64,7 +70,7 @@ eligible target well is omitted. The summary reports the actual number of lines.
 `canonical_smiles`, `concentration`, `coord_1`, and `coord_2`.
 
 Only sampled rows are densified and converted to `log1p(CP10K)`. Defaults are
-256 context cells and 128 target cells, with a target-well eligibility threshold
+512 context cells and 128 target cells, with a target-well eligibility threshold
 of 128 cells. Sampling uses replacement when a context or target pool is smaller
 than its requested sample count. Duplicate sampled rows are read once and then
 expanded back into the requested order.
@@ -238,22 +244,26 @@ runs one trial per head dimension rather than repeating identical architectures.
 ## Targeted hidden-state normalization
 
 New runs default to `normalization=layernorm` in both training modes and the
-capacity benchmark. The initial experiment adds only these placements:
+capacity benchmark. Current full models use these placements:
 
 | Model | Placement | Normalized feature width |
 |---|---|---|
 | Both | After `merger`, before attention or readout | `dim` |
 | Full | After chemical projection, once before the stack | `dim` |
 | Full | Before each block's `q_linear` | `dim` |
-| Full | Before each block's `kqv` on concatenated gene/chemical context | `2 * dim` |
+| Full, optional | Before each block's `kqv`; disabled by default (`joint_normalization=False`) | `2 * dim` |
+| Full | Separate projected Q/K/V norms before head splitting, both attention stages | `dim` each |
+| Full | After chemical attention output + chemical FFN output | `dim` |
+| Full | After gene FFN output + incoming gene residual | `dim` |
 | Full | After the complete attention stack, before readout | `dim` |
 
 LayerNorm uses learnable scale/bias and epsilon `1e-5`. It normalizes each token's
 hidden features; it never normalizes across genes or cells. The chemical states
 are normalized once because they are reused unchanged across attention blocks.
-The cosine kernel, raw coordinates, FFNs, residual connections and prediction
-outputs are unchanged. No extra `conc_ffn` or FFN normalization or coordinate
-encoder is introduced. Magnitude statistics enter the merger as described below.
+The chemical FFN residual is enabled for new full-model runs, as described above.
+The cosine kernel, raw coordinates, and output expression scale are unchanged.
+No extra `conc_ffn` normalization or coordinate encoder is introduced. Magnitude
+statistics enter the merger as described below.
 
 For an explicit new-run ablation, pass `--normalization none` to `train.py`,
 `train_small.py` or `benchmark.py`. Saved metadata and benchmark results record
@@ -330,4 +340,19 @@ training also requires the saved data paths to be available on the destination.
 
 ### Gene embedding residual
 
-New runs in both architectures use `LayerNorm(merger(features) + gene_embeddings)`. This adds an identity gradient path without changing parameter counts. `--no-gene-residual` disables it for controlled comparisons. Schema 1–3 checkpoints keep the residual disabled when the setting is absent; resuming preserves their saved architecture. New checkpoints use schema 4.
+New runs in both architectures use `LayerNorm(merger(features) + gene_embeddings)`. This adds an identity gradient path without changing parameter counts. `--no-gene-residual` disables it for controlled comparisons. Schema 1–3 checkpoints keep the residual disabled when the setting is absent; resuming preserves their saved architecture. Schema 4 introduced this setting; current checkpoints use schema 8.
+
+
+### Training mean-loss comparisons
+
+Every backward-pass CSV row and tqdm postfix includes `loss`, `t_mean_loss`,
+and `i_mean_loss`. The target baseline repeats the sampled target cells' mean
+expression vector; the input baseline repeats the sampled DMSO cells' mean
+expression vector. Means are computed per gene from log1p(CP10K) expression,
+before the model's L2 normalization. Both use the model's squared-error loss
+and `scale_exponent`, without accumulation averaging, and do not affect gradients
+or checkpoint selection. The target mean is a target-derived constant reference.
+Schema 7 adds these CSV columns. On resume, old committed rows receive blank
+baseline fields; values cannot be reconstructed from historical scalar losses.
+
+Current full models use `ffn_multiplier=2` for both FFNs and disable joint normalization before gene KQV by default. Schema 8 records both settings; older checkpoints infer them from saved tensor shapes and parameter keys. CLI ablations: `--ffn-multiplier 4` and `--joint-normalization`.

@@ -86,21 +86,29 @@ class ExternalPerturbAttention(nn.Module):
     Stage 2 (gene self-attention)
         q/k/v <- cat([genes, chemical context])  (no mask)
 
-    Queries and joint gene/context features are pre-normalised when enabled.
+    Gene queries are pre-normalised when enabled; joint pre-normalization is optional.
     Chemical states are normalised once by the parent model before the stack.
     Separate Q/K/V projections are normalised over dim before splitting heads;
-    chemical and gene FFN outputs are normalised before fusion/residual addition.
+    Chemical attention has an optional residual around its FFN, followed by
+    normalization. The gene update is normalized after its residual addition.
     """
 
     def __init__(self, dim: int, num_heads: int = 8, dropout: float = 0.1,
-                 normalization: bool = True, attention_normalization: bool = True):
+                 normalization: bool = True, attention_normalization: bool = True,
+                 chem_ffn_residual: bool = True, ffn_multiplier: int = 2,
+                 joint_normalization: bool = False):
         super().__init__()
 
         assert dim % num_heads == 0, "dim must be divisible by num_heads"
 
+        if isinstance(ffn_multiplier, bool) or not isinstance(ffn_multiplier, int) or ffn_multiplier < 1:
+            raise ValueError("ffn_multiplier must be a positive integer")
+        ffn_dim = dim * ffn_multiplier
+
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.dropout = dropout
+        self.use_chem_ffn_residual = chem_ffn_residual
 
         # Separate full-width norms after projections and FFNs, before head splitting.
         norm = lambda: nn.LayerNorm(dim) if normalization and attention_normalization else nn.Identity()
@@ -119,19 +127,19 @@ class ExternalPerturbAttention(nn.Module):
         self.query_norm = nn.LayerNorm(dim) if normalization else nn.Identity()
 
         self.chem_ffn = nn.Sequential(
-            nn.Linear(dim, dim * 4),
+            nn.Linear(dim, ffn_dim),
             nn.GELU(),
-            nn.Linear(dim * 4, dim),
+            nn.Linear(ffn_dim, dim),
         )
 
         # --- stage 2: gene -> gene self attention ---
         self.kqv = nn.Linear(dim * 2, dim * 3)
-        self.joint_norm = nn.LayerNorm(dim * 2) if normalization else nn.Identity()
+        self.joint_norm = nn.LayerNorm(dim * 2) if normalization and joint_normalization else nn.Identity()
 
         self.gene_ffn = nn.Sequential(
-            nn.Linear(dim, dim * 4),
+            nn.Linear(dim, ffn_dim),
             nn.GELU(),
-            nn.Linear(dim * 4, dim),
+            nn.Linear(ffn_dim, dim),
         )
 
     def split_heads(self, x: torch.Tensor) -> torch.Tensor:
@@ -175,7 +183,10 @@ class ExternalPerturbAttention(nn.Module):
         )
 
         chem_context = self.merge_heads(chem_context)
-        chem_context = self.chem_ffn_norm(self.chem_ffn(chem_context))
+        chem_update = self.chem_ffn(chem_context)
+        if self.use_chem_ffn_residual:
+            chem_update = chem_context + chem_update
+        chem_context = self.chem_ffn_norm(chem_update)
 
         # --- stage 2: genes attend over genes (chemically conditioned) ---
         qkv = self.kqv(self.joint_norm(torch.cat([x, chem_context], dim=-1)))
@@ -244,6 +255,9 @@ class PerturbationModel(nn.Module):
         gene_statistics: bool = True,
         gene_residual: bool = True,
         attention_normalization: bool = True,
+        chem_ffn_residual: bool = True,
+        ffn_multiplier: int = 2,
+        joint_normalization: bool = False,
     ):
         super().__init__()
 
@@ -264,6 +278,9 @@ class PerturbationModel(nn.Module):
                     dropout=dropout,
                     normalization=normalization,
                     attention_normalization=attention_normalization,
+                    chem_ffn_residual=chem_ffn_residual,
+                    ffn_multiplier=ffn_multiplier,
+                    joint_normalization=joint_normalization,
                 )
                 for _ in range(num_layers)
             ]

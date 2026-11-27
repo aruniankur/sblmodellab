@@ -18,7 +18,7 @@ from models.training.config import TrainingConfig
 from models.training.data import (DataPlan, epoch_units, make_plan, sample_example,
                                   targets, validation_units)
 from models.training.metrics import PassLog, gradient_norms, parameter_counts
-from models.training.modeling import create_model, load_chemistry, loss_for
+from models.training.modeling import create_model, load_chemistry, loss_for, mean_baseline_losses
 
 
 def device_for(cfg):
@@ -152,6 +152,9 @@ def train(cfg=None, *, resume="", additional_epochs=None, grad_clip=None):
                            "uses_attention_stack": cfg.model_type == "full",
                            "normalization": cfg.normalization,
                            "attention_normalization": cfg.attention_normalization if cfg.model_type == "full" else False,
+                           "chem_ffn_residual": cfg.chem_ffn_residual if cfg.model_type == "full" else False,
+                           "ffn_multiplier": cfg.ffn_multiplier if cfg.model_type == "full" else None,
+                           "joint_normalization": cfg.joint_normalization if cfg.model_type == "full" else False,
                            "gene_residual": cfg.gene_residual,
                            "gene_statistics": list(GENE_STAT_NAMES) if cfg.gene_statistics else []},
                     device=str(device), target_epochs=cfg.epochs)
@@ -214,6 +217,7 @@ def train(cfg=None, *, resume="", additional_epochs=None, grad_clip=None):
                         if not np.isfinite(grad_total):
                             raise FloatingPointError(f"Non-finite gradients in {unit['path']} / {sample}")
                         value = float(loss.detach())
+                        t_mean_loss, i_mean_loss = mean_baseline_losses(example, cfg)
                         progress["backward_pass"] += 1
                         progress["passes_in_epoch"] += 1
                         progress["loss_sum"] += value
@@ -225,13 +229,17 @@ def train(cfg=None, *, resume="", additional_epochs=None, grad_clip=None):
                                    "control_sample": backed.control_wells[micro % len(backed.control_wells)].sample,
                                    "target_sample": sample, "drug": example.drug,
                                    "dose": example.concentration, "loss": value,
+                                   "t_mean_loss": t_mean_loss, "i_mean_loss": i_mean_loss,
                                    "backward_loss": float(backward_loss.detach()), "grad_total": grad_total,
                                    "seconds": time.perf_counter() - start,
                                    "peak_vram_gb": torch.cuda.max_memory_allocated(device) / 1e9 if device.type == "cuda" else 0,
                                    **{f"grad_{key}": value for key, value in norms.items()}})
                         bar.update()
-                        bar.set_postfix(loss=f"{value:.4f}", grad=f"{grad_total:.2e}",
-                                        file=Path(unit["path"]).stem)
+                        bar.set_postfix({"loss": f"{value:.4f}",
+                                         "t_mean_loss": f"{t_mean_loss:.4f}",
+                                         "i_mean_loss": f"{i_mean_loss:.4f}",
+                                         "grad": f"{grad_total:.2e}",
+                                         "file": Path(unit["path"]).stem})
                     if cfg.grad_clip:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip,
                                                        error_if_nonfinite=True)
