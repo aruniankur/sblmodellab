@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import copy
+import json
+import math
 import time
 from datetime import datetime
 from pathlib import Path
@@ -18,7 +20,7 @@ from models.training.config import TrainingConfig
 from models.training.data import (DataPlan, epoch_units, make_plan, sample_example,
                                   targets, validation_units)
 from models.training.metrics import PassLog, gradient_norms, parameter_counts
-from models.training.modeling import create_model, load_chemistry, loss_for, mean_baseline_losses
+from models.training.modeling import create_model, load_chemistry, losses_for_batch, mean_baseline_losses
 
 
 def device_for(cfg):
@@ -56,9 +58,11 @@ def evaluate(model, store, plan, cfg, device, cache):
                 backed = checked_file(cache, record, plan)
                 wells = targets(backed, cfg)
                 picks = rng.permutation(len(wells))[:min(cfg.batches_per_unit, len(wells))]
-                for index, pick in enumerate(picks):
-                    example = sample_example(backed, wells[int(pick)].sample, cfg, rng, index)
-                    losses.append(float(loss_for(model, example, cfg, device, store)))
+                examples = [sample_example(backed, wells[int(pick)].sample, cfg, rng, index)
+                            for index, pick in enumerate(picks)]
+                for offset in range(0, len(examples), cfg.batch_size):
+                    losses.extend(losses_for_batch(model, examples[offset:offset + cfg.batch_size],
+                                                   cfg, device, store).cpu().tolist())
     finally:
         model.train()
     return float(np.mean(losses)) if losses else None, label
@@ -72,21 +76,23 @@ def dry_run(cfg):
     try:
         record = next(r for r in plan.files if r["cell_line"] in plan.train_lines)
         backed = cache.get(record["path"])
-        example = sample_example(backed, targets(backed, cfg)[0].sample, cfg,
-                                 np.random.default_rng(cfg.seed))
+        wells = targets(backed, cfg)
+        examples = [sample_example(backed, well.sample, cfg, np.random.default_rng(cfg.seed + i), i)
+                    for i, well in enumerate(wells[:cfg.batch_size])]
         print(f"Usable files: {len(plan.files)}; train lines: {len(plan.train_lines)}; held out: {plan.val_lines}")
-        print(f"genes={plan.n_genes}; control={tuple(example.control.shape)}; "
-              f"target={tuple(example.target.shape)}; coords={tuple(example.coords.shape)}")
+        print(f"B={len(examples)}; genes={plan.n_genes}; control={tuple(torch.stack([e.control for e in examples]).shape)}; "
+              f"target={tuple(torch.stack([e.target for e in examples]).shape)}; "
+              f"coords={tuple(torch.stack([e.coords for e in examples]).shape)}")
         if store is not None:
-            chem, mask = store.collate([example.drug], [example.concentration], mode=cfg.chem_tokens)
-            print(f"chem={tuple(chem.shape)}; mask={tuple(mask.shape)}")
+            chem, mask = store.collate([e.drug for e in examples], [e.concentration for e in examples], mode=cfg.chem_tokens)
+            print(f"chem={tuple(chem.shape)}; mask={tuple(mask.shape)}; drugs={[e.drug for e in examples]}")
         else:
             print("DMSO-only: no chemical cache or chemical tensors")
     finally:
         cache.close()
 
 
-def train(cfg=None, *, resume="", additional_epochs=None, grad_clip=None):
+def train(cfg=None, *, resume="", additional_epochs=None, grad_clip=None, batch_size=None):
     """Start a fresh run, or restore the saved configuration and add epochs.
 
     A unit ends with one optimizer update. Checkpoints are written only at unit
@@ -102,6 +108,17 @@ def train(cfg=None, *, resume="", additional_epochs=None, grad_clip=None):
         if additional_epochs is None or additional_epochs <= 0:
             raise ValueError("Specify a positive number of additional epochs")
         progress = state["progress"]
+        if batch_size is not None:
+            if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+                raise ValueError("batch_size must be a positive integer")
+            cfg.batch_size = batch_size
+            cfg.accumulate_batches = False
+            if progress["units"] is not None:
+                done = progress["units"][:progress["cursor"]]
+                pending = progress["units"][progress["cursor"]:]
+                progress["units"] = done + [{**unit, "samples": unit["samples"][i:i + batch_size]}
+                    for unit in pending for i in range(0, len(unit["samples"]), batch_size)]
+
         # An incomplete current epoch counts as the first additional epoch.
         cfg.epochs = progress["epoch"] + additional_epochs
         plan = DataPlan.from_dict(state["plan"])
@@ -152,17 +169,23 @@ def train(cfg=None, *, resume="", additional_epochs=None, grad_clip=None):
                            "uses_attention_stack": cfg.model_type == "full",
                            "normalization": cfg.normalization,
                            "attention_normalization": cfg.attention_normalization if cfg.model_type == "full" else False,
+                           "chem_skip_gate": cfg.chem_skip_gate if cfg.model_type == "full" else False,
+                           "chem_skip_init": cfg.chem_skip_init if cfg.model_type == "full" and cfg.chem_skip_gate else None,
                            "chem_ffn_residual": cfg.chem_ffn_residual if cfg.model_type == "full" else False,
                            "ffn_multiplier": cfg.ffn_multiplier if cfg.model_type == "full" else None,
                            "joint_normalization": cfg.joint_normalization if cfg.model_type == "full" else False,
                            "gene_residual": cfg.gene_residual,
                            "gene_statistics": list(GENE_STAT_NAMES) if cfg.gene_statistics else []},
-                    device=str(device), target_epochs=cfg.epochs)
+                    device=str(device), target_epochs=cfg.epochs,
+                    batching={"forward_batch_size": cfg.batch_size, "max_wells_per_update": cfg.batches_per_unit if cfg.accumulate_batches else cfg.batch_size,
+                              "checkpoint_layers": cfg.checkpoint_layers if cfg.model_type == "full" else False,
+                              "update_every_forward": not cfg.accumulate_batches})
         write_json(run_dir / "info.json", info)
         write_json(run_dir / "config.json", cfg.to_dict())
         print(f"Run: {run_dir}\nModel: {cfg.model_type}; mode: {cfg.mode}; "
               f"train cell lines: {len(plan.train_lines)}; validation lines: {plan.val_lines}; "
-              f"genes: {plan.n_genes}; parameters: {sum(groups.values()):,}; normalization: {cfg.normalization}")
+              f"genes: {plan.n_genes}; parameters: {sum(groups.values()):,}; normalization: {cfg.normalization}; "
+              f"forward batch size: {cfg.batch_size}")
         if cfg.model_type == "control":
             print("DMSO-only reconstruction. Head sizing sets width/bottleneck; layers/dropout are inactive.")
         cache = FileCache(cfg.file_cache)
@@ -190,56 +213,71 @@ def train(cfg=None, *, resume="", additional_epochs=None, grad_clip=None):
                 progress["units"] = epoch_units(plan, cfg, rng)
             units = progress["units"]
             remaining = units[progress["cursor"]:]
-            pass_total = sum(len(u["samples"]) for u in units)
-            done_passes = sum(len(u["samples"]) for u in units[:progress["cursor"]])
+            pass_total = sum(math.ceil(len(u["samples"]) / cfg.batch_size) for u in units)
+            done_passes = sum(math.ceil(len(u["samples"]) / cfg.batch_size) for u in units[:progress["cursor"]])
             with tqdm(total=pass_total, initial=done_passes,
                       desc=f"Epoch {progress['epoch'] + 1} backward passes", unit="pass", leave=False) as bar:
                 for unit in remaining:
                     backed = checked_file(cache, unit, plan)
                     optimizer.zero_grad(set_to_none=True)
                     count = len(unit["samples"])
-                    for micro, sample in enumerate(unit["samples"]):
+                    if not cfg.accumulate_batches and count > cfg.batch_size:
+                        raise ValueError("Optimizer units must contain a single forward batch")
+                    accumulation_count = math.ceil(count / cfg.batch_size)
+                    for micro, offset in enumerate(range(0, count, cfg.batch_size)):
                         start = time.perf_counter()
                         if device.type == "cuda":
                             torch.cuda.reset_peak_memory_stats(device)
-                        example = sample_example(backed, sample, cfg, rng, micro)
-                        previous = None
-                        if micro:
-                            previous = {name: p.grad.detach().clone() for name, p in model.named_parameters()
-                                        if p.grad is not None}
-                        loss = loss_for(model, example, cfg, device, store)
-                        if not torch.isfinite(loss):
-                            raise FloatingPointError(f"Non-finite loss in {unit['path']} / {sample}")
-                        backward_loss = loss / count
+                        samples = unit["samples"][offset:offset + cfg.batch_size]
+                        examples = [sample_example(backed, sample, cfg, rng, offset + index)
+                                    for index, sample in enumerate(samples)]
+                        size = len(examples)
+                        previous = ({name: p.grad.detach().clone() for name, p in model.named_parameters()
+                                     if p.grad is not None} if micro else None)
+                        per_well = losses_for_batch(model, examples, cfg, device, store)
+                        loss = per_well.mean()
+                        if not torch.isfinite(per_well).all():
+                            raise FloatingPointError(f"Non-finite loss in {unit['path']} / {samples}")
+                        # Equal weight per well, including a short final forward batch.
+                        backward_loss = loss * (size / count)
                         backward_loss.backward()
-                        norms, grad_total = gradient_norms(model, groups, previous, multiplier=count)
+                        norms, grad_total = gradient_norms(model, groups, previous, multiplier=count / size)
                         del previous
                         if not np.isfinite(grad_total):
-                            raise FloatingPointError(f"Non-finite gradients in {unit['path']} / {sample}")
+                            raise FloatingPointError(f"Non-finite gradients in {unit['path']} / {samples}")
+                        values = per_well.detach().cpu().tolist()
+                        baselines = [mean_baseline_losses(example, cfg) for example in examples]
                         value = float(loss.detach())
-                        t_mean_loss, i_mean_loss = mean_baseline_losses(example, cfg)
+                        t_mean_loss = float(np.mean([v[0] for v in baselines]))
+                        i_mean_loss = float(np.mean([v[1] for v in baselines]))
                         progress["backward_pass"] += 1
-                        progress["passes_in_epoch"] += 1
-                        progress["loss_sum"] += value
+                        progress["passes_in_epoch"] += size  # wells, for weighted epoch loss
+                        progress["loss_sum"] += sum(values)
+                        details = [{"control_sample": backed.control_wells[(offset + i) % len(backed.control_wells)].sample,
+                                    "target_sample": samples[i], "drug": example.drug,
+                                    "dose": example.concentration, "loss": values[i],
+                                    "t_mean_loss": baselines[i][0], "i_mean_loss": baselines[i][1]}
+                                   for i, example in enumerate(examples)]
+                        doses = {example.concentration for example in examples}
                         log.write({"epoch": progress["epoch"] + 1, "unit": progress["cursor"] + 1,
                                    "optimizer_step": progress["optimizer_step"] + 1,
                                    "backward_pass": progress["backward_pass"], "micro_batch": micro + 1,
-                                   "accumulation_count": count, "file": Path(unit["path"]).name,
+                                   "accumulation_count": accumulation_count, "batch_size": size,
+                                   "batch_samples": json.dumps(details), "file": Path(unit["path"]).name,
                                    "plate": unit["plate"], "cell_line": unit["cell_line"],
-                                   "control_sample": backed.control_wells[micro % len(backed.control_wells)].sample,
-                                   "target_sample": sample, "drug": example.drug,
-                                   "dose": example.concentration, "loss": value,
+                                   "control_sample": " | ".join(d["control_sample"] for d in details),
+                                   "target_sample": " | ".join(samples),
+                                   "drug": " | ".join(example.drug for example in examples),
+                                   "dose": next(iter(doses)) if len(doses) == 1 else "", "loss": value,
                                    "t_mean_loss": t_mean_loss, "i_mean_loss": i_mean_loss,
                                    "backward_loss": float(backward_loss.detach()), "grad_total": grad_total,
                                    "seconds": time.perf_counter() - start,
                                    "peak_vram_gb": torch.cuda.max_memory_allocated(device) / 1e9 if device.type == "cuda" else 0,
-                                   **{f"grad_{key}": value for key, value in norms.items()}})
+                                   **{f"grad_{key}": v for key, v in norms.items()}})
                         bar.update()
-                        bar.set_postfix({"loss": f"{value:.4f}",
-                                         "t_mean_loss": f"{t_mean_loss:.4f}",
-                                         "i_mean_loss": f"{i_mean_loss:.4f}",
-                                         "grad": f"{grad_total:.2e}",
-                                         "file": Path(unit["path"]).stem})
+                        bar.set_postfix({"loss": f"{value:.4f}", "t_mean_loss": f"{t_mean_loss:.4f}",
+                                         "i_mean_loss": f"{i_mean_loss:.4f}", "B": size,
+                                         "grad": f"{grad_total:.2e}", "file": Path(unit["path"]).stem})
                     if cfg.grad_clip:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip,
                                                        error_if_nonfinite=True)
@@ -262,6 +300,9 @@ def train(cfg=None, *, resume="", additional_epochs=None, grad_clip=None):
                                    label: score, "seconds": time.perf_counter() - epoch_start,
                                    "optimizer_step": progress["optimizer_step"],
                                    "backward_pass": progress["backward_pass"]})
+            if cfg.model_type == "full" and cfg.chem_skip_gate:
+                info["epochs"][-1]["chem_skip_gates"] = [
+                    float(layer.chem_skip_gate_logit.detach().sigmoid()) for layer in model.layers]
             improved = score is not None and (progress["best_score"] is None or score < progress["best_score"])
             if improved:
                 progress["best_score"] = score

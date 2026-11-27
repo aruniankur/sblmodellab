@@ -9,6 +9,7 @@ from pathlib import Path
 # CSV is text: limit gradient display precision without changing training tensors.
 GRADIENT_DECIMAL_PLACES = 8
 MEAN_LOSS_FIELDS = ("t_mean_loss", "i_mean_loss")
+BATCH_FIELDS = ("batch_size", "batch_samples")
 
 
 def parameter_group(name):
@@ -47,7 +48,7 @@ class PassLog:
     def __init__(self, path, groups, committed_passes=0):
         self.path = Path(path)
         self.fields = ["epoch", "unit", "optimizer_step", "backward_pass", "micro_batch",
-                       "accumulation_count", "file", "plate", "cell_line", "control_sample",
+                       "accumulation_count", *BATCH_FIELDS, "file", "plate", "cell_line", "control_sample",
                        "target_sample", "drug", "dose", "loss", *MEAN_LOSS_FIELDS, "backward_loss", "grad_total",
                        "seconds", "peak_vram_gb"] + [f"grad_{key}" for key in groups]
         if self.path.exists():
@@ -55,8 +56,9 @@ class PassLog:
             tmp = self.path.with_suffix(".csv.tmp")
             with self.path.open(newline="", encoding="utf-8") as src, tmp.open("w", newline="", encoding="utf-8") as dst:
                 reader = csv.DictReader(src)
-                legacy_fields = [field for field in self.fields if field not in MEAN_LOSS_FIELDS]
-                if reader.fieldnames not in (self.fields, legacy_fields):
+                accepted = [[field for field in self.fields if field not in removed]
+                            for removed in ((), MEAN_LOSS_FIELDS, BATCH_FIELDS, MEAN_LOSS_FIELDS + BATCH_FIELDS)]
+                if reader.fieldnames not in accepted:
                     raise ValueError("CSV schema differs from saved model parameter groups")
                 # Schema <= 6 did not log means. Keep historical values intact;
                 # DictWriter fills the new columns with blanks for those rows.
@@ -64,6 +66,8 @@ class PassLog:
                 writer.writeheader()
                 for row in reader:
                     if int(row["backward_pass"]) <= committed_passes:
+                        if "batch_size" not in row:
+                            row["batch_size"] = 1
                         writer.writerow(row)
             os.replace(tmp, self.path)
         self.fh = self.path.open("a", newline="", encoding="utf-8")

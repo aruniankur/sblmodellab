@@ -18,7 +18,7 @@ if __package__ in (None, ""):
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RESULTS = Path(__file__).resolve().parent / "benchmark_results"
 FIELDS = ["dim", "head_dim", "conc_dim", "layers", "heads", "model_type", "normalization", "gene_statistics", "status", "completed_steps", "parameters",
-          "n_genes", "micro_batches_per_unit", "seconds_per_unit", "seconds_per_backward",
+          "n_genes", "batch_size", "micro_batches_per_unit", "seconds_per_unit", "seconds_per_backward",
           "peak_allocated_gb", "peak_reserved_gb", "total_vram_gb", "available_vram_gb",
           "loss", "grad_total", "data_seconds", "wall_seconds", "device", "file", "reason"]
 
@@ -145,6 +145,7 @@ def parse_args(argv=None):
     parser.add_argument("--n-control", type=int, default=512)
     parser.add_argument("--n-target", type=int, default=128)
     parser.add_argument("--min-cells", type=int, default=128)
+    parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--batches-per-unit", type=int, default=2)
     parser.add_argument("--atom-cache", default=None)
     parser.add_argument("--out", default=None, help="New report folder; existing folders are never overwritten")
@@ -173,7 +174,7 @@ def main(argv=None):
     except ValueError as exc:
         parser.error(str(exc))
     kwargs = {key: getattr(args, key) for key in ("heads", "query_chunk", "readout_chunk",
-                                                "n_control", "n_target", "min_cells", "batches_per_unit")}
+                                                "n_control", "n_target", "min_cells", "batches_per_unit", "batch_size")}
     cfg = TrainingConfig(model_type=args.model, mode="single", head_dim=head_dims[0],
                          normalization=args.normalization, gene_statistics=args.gene_statistics,
                          amp=args.amp or detected_amp, **kwargs)

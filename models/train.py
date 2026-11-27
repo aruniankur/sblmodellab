@@ -15,7 +15,7 @@ def main(argv=None):
     args, cfg = parse_args(argv)
     if args.resume:
         return train(resume=args.resume, additional_epochs=args.epochs if args.epochs is not None else 10,
-                     grad_clip=args.grad_clip)
+                     grad_clip=args.grad_clip, batch_size=args.batch_size)
     if args.dry_run:
         return dry_run(cfg)
     return train(cfg)

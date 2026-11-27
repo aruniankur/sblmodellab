@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import math
 import time
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from models.training.config import TrainingConfig
 from models.training.data import sample_example, targets
 from models.training.engine import device_for
 from models.training.metrics import gradient_norms, parameter_counts
-from models.training.modeling import create_model, load_chemistry, loss_for
+from models.training.modeling import create_model, load_chemistry, losses_for_batch
 
 
 def run_trial(cfg, *, warmup=1, steps=2, max_vram_fraction=0.9):
@@ -32,7 +33,7 @@ def run_trial(cfg, *, warmup=1, steps=2, max_vram_fraction=0.9):
     np.random.seed(cfg.seed)
     rng = np.random.default_rng(cfg.seed)
     result = {"dim": cfg.dim, "head_dim": cfg.head_dim, "conc_dim": cfg.conc_dim,
-              "layers": cfg.layers, "heads": cfg.heads,
+              "layers": cfg.layers, "heads": cfg.heads, "batch_size": cfg.batch_size,
               "model_type": cfg.model_type, "normalization": cfg.normalization, "gene_statistics": cfg.gene_statistics, "gene_residual": cfg.gene_residual, "status": "error", "completed_steps": 0,
               "seconds_per_unit": None, "peak_allocated_gb": 0., "peak_reserved_gb": 0.,
               "loss": None, "grad_total": None, "reason": ""}
@@ -53,12 +54,12 @@ def run_trial(cfg, *, warmup=1, steps=2, max_vram_fraction=0.9):
         wells = targets(backed, cfg)
         if not wells or not backed.control_wells:
             raise ValueError("File needs DMSO context and eligible finite-coordinate target wells")
-        count = min(cfg.batches_per_unit, len(wells))
+        count = min(cfg.batches_per_unit if cfg.accumulate_batches else cfg.batch_size, len(wells))
         picks = rng.permutation(len(wells))[:count]
         examples = [sample_example(backed, wells[int(pick)].sample, cfg, rng, index)
                     for index, pick in enumerate(picks)]
         result.update(n_genes=backed.n_vars, file=str(Path(cfg.file).resolve()),
-                      micro_batches_per_unit=count, data_seconds=time.perf_counter() - started)
+                      micro_batches_per_unit=math.ceil(count / cfg.batch_size), data_seconds=time.perf_counter() - started)
         backed.close()
         backed = None
         store = load_chemistry(cfg)
@@ -74,18 +75,19 @@ def run_trial(cfg, *, warmup=1, steps=2, max_vram_fraction=0.9):
             start = time.perf_counter()
             optimizer.zero_grad(set_to_none=True)
             values = []
-            for micro, example in enumerate(examples):
+            for micro, offset in enumerate(range(0, count, cfg.batch_size)):
+                batch = examples[offset:offset + cfg.batch_size]
                 previous = ({name: p.grad.detach().clone() for name, p in model.named_parameters()
                              if p.grad is not None} if micro else None)
-                loss = loss_for(model, example, cfg, device, store)
-                if not torch.isfinite(loss):
+                per_well = losses_for_batch(model, batch, cfg, device, store)
+                if not torch.isfinite(per_well).all():
                     raise FloatingPointError("Non-finite training loss")
-                (loss / count).backward()
-                _, norm = gradient_norms(model, groups, previous, multiplier=count)
+                (per_well.mean() * (len(batch) / count)).backward()
+                _, norm = gradient_norms(model, groups, previous, multiplier=count / len(batch))
                 del previous
                 if not np.isfinite(norm):
                     raise FloatingPointError("Non-finite training gradients")
-                values.append(float(loss.detach()))
+                values.extend(per_well.detach().cpu().tolist())
             if cfg.grad_clip:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip, error_if_nonfinite=True)
             optimizer.step()
@@ -97,7 +99,7 @@ def run_trial(cfg, *, warmup=1, steps=2, max_vram_fraction=0.9):
                 result["completed_steps"] += 1
             result.update(loss=float(np.mean(values)), grad_total=norm)
         result["seconds_per_unit"] = float(np.mean(times))
-        result["seconds_per_backward"] = result["seconds_per_unit"] / count
+        result["seconds_per_backward"] = result["seconds_per_unit"] / math.ceil(count / cfg.batch_size)
         if device.type == "cuda":
             reserved = torch.cuda.max_memory_reserved(device) / 1e9
             result.update(peak_allocated_gb=torch.cuda.max_memory_allocated(device) / 1e9,

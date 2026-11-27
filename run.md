@@ -265,7 +265,7 @@ New runs enable LayerNorm, five log-expression statistics and the gene residual:
 gene_states = LayerNorm(merger(features) + gene_embeddings)
 ```
 
-Current checkpoints use schema 8. Older supported checkpoints preserve their original architecture when settings are absent, including a disabled gene residual. New full-model runs also use `chem_context = LayerNorm(chem_context + chem_ffn(chem_context))`. Schema-5 and older checkpoints keep this chemical FFN residual disabled when its setting is absent. Starting a new run uses the current defaults; resuming does not silently upgrade an older architecture.
+Current checkpoints use schema 10. Older supported checkpoints preserve their original architecture when settings are absent, including a disabled gene residual. New full-model runs also use `chem_context = LayerNorm(chem_context + chem_ffn(chem_context))`. Schema-5 and older checkpoints keep this chemical FFN residual disabled when its setting is absent. Starting a new run uses the current defaults; resuming does not silently upgrade an older architecture.
 
 ## 9. Understand saved files and progress
 
@@ -442,3 +442,19 @@ python zipfolder.py --help
 Core code lives under `models/`; the dashboard is under `UIeval/`. See `models/README_training.md` for implementation details and `models/model_flow.mmd` for the architecture diagram. There is no standalone inference CLI documented here; training checkpoints require the matching model architecture and input preparation for custom prediction code.
 
 New full-model runs use `ffn_multiplier=2` and `joint_normalization=False`. These settings are saved explicitly. Older checkpoint widths and joint-norm placement are inferred from saved weights when absent. Use a new run for the current architecture.
+
+New full-model runs enable a learnable direct chemical skip per block. Each
+sigmoid gate starts at 0.1; use `--chem-skip-init` or `--no-chem-skip-gate` for
+new-run ablations. Schema 9 saves the gate settings and learned weights.
+Older checkpoints resume with gates disabled. Effective per-layer values are
+saved in each completed epoch's `chem_skip_gates` entry in `info.json`.
+
+`run.py` now asks for forward batch size B on new and continued training.
+New runs default to B=2, with an optimizer update after every forward/backward
+batch and no gradient accumulation. Each well retains separate control cells,
+chemical tokens/mask, dose, coordinates and targets. Short batches are allowed.
+Schema 10 saves batching and activation-checkpointing settings. `--batch-size`
+also works in training and benchmark CLIs; a resume B override switches old
+runs to per-batch updates. Logs include actual `batch_size` and JSON
+`batch_samples` with individual losses and baselines. Layer activation
+checkpointing saves VRAM by recomputing during backward.

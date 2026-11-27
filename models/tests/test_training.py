@@ -66,7 +66,7 @@ class PipelineTests(unittest.TestCase):
 
     def cfg(self, **values):
         defaults = dict(model_type="control", root=str(self.data), dim=16, conc_dim=4,
-                        heads=2, layers=1, epochs=1, n_control=8, n_target=8, min_cells=2,
+                        heads=2, layers=1, epochs=1, batch_size=1, accumulate_batches=True, n_control=8, n_target=8, min_cells=2,
                         passes_per_cell_line=1, batches_per_unit=2, file_cache=2,
                         query_chunk=5, readout_chunk=3, amp="off", dropout=0., grad_clip=3., save_every=1)
         return TrainingConfig(**{**defaults, **values})
@@ -185,7 +185,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("t_mean_loss=", stream.getvalue())
         self.assertIn("i_mean_loss=", stream.getvalue())
         _, state = load_checkpoint(run)
-        self.assertEqual(state["schema_version"], 8)
+        self.assertEqual(state["schema_version"], 10)
 
     def test_full_single_training_and_additional_epoch_resume(self):
         cfg = self.cfg(model_type="full", mode="single", file=str(self.data / "plate1_A.h5ad"))
@@ -204,6 +204,8 @@ class PipelineTests(unittest.TestCase):
         info = json.loads((run / "info.json").read_text())
         self.assertEqual(info["status"], "finished")
         self.assertIn("reconstruction_probe", info["epochs"][0])
+        self.assertEqual(len(info["epochs"][0]["chem_skip_gates"]), 1)
+        self.assertIn("grad_layer0.chem_skip_gate_logit", rows[0])
         self.assertTrue((run / "best.pt").exists())
         self.assertTrue(run.name.endswith("_full"))
 
@@ -299,7 +301,7 @@ class PipelineTests(unittest.TestCase):
             model.load_state_dict(restored["model"], strict=True)
             train(resume=str(run), additional_epochs=1)
         _, resumed = load_checkpoint(run)
-        self.assertEqual(resumed["schema_version"], 8)
+        self.assertEqual(resumed["schema_version"], 10)
         self.assertEqual(resumed["config"]["normalization"], "none")
         self.assertEqual(resumed["progress"]["epoch"], 2)
         self.assertFalse(any("norm." in key for key in resumed["model"]))
@@ -317,7 +319,7 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(restored["model"]["merger.weight"].shape[1], 20)
             train(resume=str(run), additional_epochs=1)
         _, resumed = load_checkpoint(run)
-        self.assertEqual(resumed["schema_version"], 8)
+        self.assertEqual(resumed["schema_version"], 10)
         self.assertFalse(resumed["config"]["gene_statistics"])
         self.assertEqual(resumed["model"]["merger.weight"].shape[1], 20)
         self.assertEqual(resumed["progress"]["epoch"], 2)
@@ -355,10 +357,12 @@ class PipelineTests(unittest.TestCase):
     def test_interactive_new_and_resume_menus(self):
         from models.run import main
         with patch("models.run.check_environment", return_value="off"), patch(
-                "builtins.input", side_effect=["1", "2", "1", "8", "128", "1", "3"]), patch(
+                "builtins.input", side_effect=["1", "2", "1", "8", "128", "1", "4", "3"]), patch(
                 "models.training.engine.train") as training:
             main()
             cfg = training.call_args.args[0]
+            self.assertEqual(cfg.batch_size, 4)
+            self.assertFalse(cfg.accumulate_batches)
             self.assertEqual((cfg.model_type, cfg.mode, cfg.dim, cfg.conc_dim,
                               cfg.heads, cfg.layers, cfg.epochs), ("control", "all", 1024, 128, 8, 1, 3))
         saved = self.root / "model_example_control"
@@ -367,10 +371,10 @@ class PipelineTests(unittest.TestCase):
         (saved / "config.json").write_text(json.dumps({"model_type": "control", "mode": "all"}))
         with patch("models.run.check_environment", return_value="off"), patch(
                 "models.training.config.TRAINED_ROOT", self.root), patch(
-                "builtins.input", side_effect=["2", "1", "7"]), patch(
+                "builtins.input", side_effect=["2", "1", "7", "3"]), patch(
                 "models.training.engine.train") as training:
             main()
-            training.assert_called_once_with(resume=str(saved), additional_epochs=7)
+            training.assert_called_once_with(resume=str(saved), additional_epochs=7, batch_size=3)
 
     def test_head_sizing_defaults_and_command_line(self):
         _, cfg = parse_args(["--heads", "8", "--head-dim", "128"])

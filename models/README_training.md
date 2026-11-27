@@ -16,10 +16,11 @@ launcher; `python models/run.py` and `cd models; python run.py` also work.
    otherwise; CPU fallback is reported explicitly.
 3. Choose a new run or an existing saved run.
 4. For a new run, choose `full` or `control`, then all files or one file.
-5. Enter only `heads`, `head_dim`, `layers` and `epochs`. Total width is
+5. Enter `heads`, `head_dim`, `layers`, forward batch size `B`, and `epochs`. Total width is
    `dim = heads * head_dim`; the co-expression bottleneck is `conc_dim = head_dim`.
    Gene count and chemical feature width come from the data and MolFormer cache.
 6. For an existing run, choose the run and enter the number of additional epochs.
+   Select the forward batch size B; each batch updates weights once.
    Saved architecture, optimizer and data selection are restored. Clipping uses
    the current default of `3.0`, including when resuming an older run.
 
@@ -46,10 +47,12 @@ line**. Different DMSO wells and overlapping cells are allowed. All training is
 restricted to plates **1-12**, including single-file training.
 
 - **All-file mode:** sample five distinct available plates per training cell line
-  per epoch. Up to two target wells per file contribute separate backward passes
-  followed by one averaged-gradient optimizer update.
+  per epoch. Select up to `max(batch_size, batches_per_unit)` target wells per file
+  and group them into forward batches of at most B wells. Every batch has one
+  backward pass and one optimizer update; new runs do not accumulate gradients.
 - **Single-file mode:** visit every eligible target well in the chosen file once
-  per epoch, in random order, with one backward pass and update per well.
+  per epoch, in random order, grouped into B-well batches. Each forward batch
+  has one backward pass and one optimizer update.
 - **Control:** train every eligible cell line with usable coordinates (48 in the
   intended dataset). No cell lines are reserved. Fixed DMSO reconstruction probes
   measure fitting; they are not held-out generalization measurements.
@@ -340,7 +343,7 @@ training also requires the saved data paths to be available on the destination.
 
 ### Gene embedding residual
 
-New runs in both architectures use `LayerNorm(merger(features) + gene_embeddings)`. This adds an identity gradient path without changing parameter counts. `--no-gene-residual` disables it for controlled comparisons. Schema 1–3 checkpoints keep the residual disabled when the setting is absent; resuming preserves their saved architecture. Schema 4 introduced this setting; current checkpoints use schema 8.
+New runs in both architectures use `LayerNorm(merger(features) + gene_embeddings)`. This adds an identity gradient path without changing parameter counts. `--no-gene-residual` disables it for controlled comparisons. Schema 1–3 checkpoints keep the residual disabled when the setting is absent; resuming preserves their saved architecture. Schema 4 introduced this setting; current checkpoints use schema 10.
 
 
 ### Training mean-loss comparisons
@@ -356,3 +359,46 @@ Schema 7 adds these CSV columns. On resume, old committed rows receive blank
 baseline fields; values cannot be reconstructed from historical scalar losses.
 
 Current full models use `ffn_multiplier=2` for both FFNs and disable joint normalization before gene KQV by default. Schema 8 records both settings; older checkpoints infer them from saved tensor shapes and parameter keys. CLI ablations: `--ffn-multiplier 4` and `--joint-normalization`.
+
+
+New full runs also use a direct chemical skip in every attention block:
+`gene_ffn_norm(x + gene_ffn(gene_context) + sigmoid(chem_skip_gate_logit) * chem_context)`.
+Each block learns its own scalar gate, initialized to 0.1 and bounded to [0, 1]
+by sigmoid. Chemical context is taken after the chemical FFN residual and norm.
+`--chem-skip-init` changes the initial value (strictly between 0 and 1);
+`--no-chem-skip-gate` disables this new-run ablation. Schema 9 records both
+settings and saves the learned logits as model parameters. Gate gradient norms
+are included automatically in CSV parameter groups; effective gate values are
+recorded per completed epoch as `chem_skip_gates` in `info.json`.
+Checkpoints from schema 8 or earlier default to gates disabled, preserving
+strict weight/optimizer loading and original forward behavior. Resuming such a
+run does not enable gates: start a new gated run to use this architecture.
+
+
+Schema 10 records `batch_size`, `checkpoint_layers`, and legacy-only
+`accumulate_batches`. New runs default to B=2 and no accumulation; each item
+has its own 512 control cells, 128 targets, chemistry, dose and coordinates.
+Chemical tokens are padded with per-item masks; different drugs are preferred
+within a batch when the selected file permits. Short final batches are allowed.
+The interactive launcher asks B for both new and continued runs. CLI examples:
+`python models/train.py --batch-size 4`, or
+`python models/train.py --resume <run> --epochs 2 --batch-size 4`.
+An explicit resumed B disables legacy accumulation and splits pending units if
+needed; a pending old unit may be smaller than the requested B until the next
+epoch. CLI resume without a B override preserves the saved update policy.
+Older checkpoints default to B=1 with their original accumulation policy.
+
+`log.csv` has one row per actual backward batch. `batch_size` is its actual
+number of wells; `batch_samples` is JSON containing each well's drug, dose,
+control/target sample, individual loss and both mean baselines. Top-level losses
+are batch averages; gradients are those of the batch mean before clipping.
+`backward_pass` counts actual backward calls. Epoch losses are weighted by
+number of wells. New CSV columns are added on resume; old rows are B=1.
+The dashboard retains batch metadata as text.
+
+Full-model layer activation checkpointing defaults on to reduce B>1 VRAM:
+layer activations are recomputed during backward with dropout RNG preserved.
+`--no-checkpoint-layers` disables it for new runs. Old checkpoints retain their
+saved behavior. The capacity benchmark uses the configured real forward B;
+use `python models/benchmark.py --batch-size 2` to measure your exact GPU and
+model configuration. Passing a small local test does not certify 48-GB fit.

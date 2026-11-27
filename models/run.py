@@ -85,7 +85,9 @@ def main():
             descriptions.append(f"{run.name} ({cfg['model_type']}, {cfg['mode']})")
         selected = runs[choice("Select a saved run", descriptions)]
         epochs = number("How many more epochs?", 10)
-        train(resume=str(selected), additional_epochs=epochs)
+        saved = json.loads((selected / "config.json").read_text(encoding="utf-8"))
+        batch_size = number("treatment wells per forward batch (B)", saved.get("batch_size", 2))
+        train(resume=str(selected), additional_epochs=epochs, batch_size=batch_size)
         return
 
     model_type = ("full", "control")[choice("Model", ["Full chemical perturbation model", "Control: DMSO only"])]
@@ -103,6 +105,7 @@ def main():
         cfg.set_head_shape(heads, head_dim)
         print(f"Derived dim={cfg.dim}, conc_dim={cfg.conc_dim}")
         cfg.layers = number("layers", 1, 0 if model_type == "control" else 1)
+        cfg.batch_size = number("treatment wells per forward batch (B)", 2)
         cfg.epochs = number("epochs", 60 if mode == "all" else 10)
         try:
             cfg.validate()
@@ -111,6 +114,7 @@ def main():
             print(f"Invalid configuration: {exc}")
     if model_type == "full" and not Path(cfg.atom_cache).is_file():
         raise SystemExit("Chemical cache is missing. Build it first with: python models/molformer_atoms.py")
+    print(f"B={cfg.batch_size}: one forward/backward batch, then one optimizer update; no gradient accumulation.")
     train(cfg)
 
 

@@ -12,7 +12,7 @@ from pathlib import Path
 import pandas as pd
 
 DEFAULT_RUNS_ROOT = Path(__file__).resolve().parents[1] / "models" / "trained_model"
-TEXT_COLUMNS = {"file", "cell_line", "control_sample", "target_sample", "drug", "unit"}
+TEXT_COLUMNS = {"file", "cell_line", "control_sample", "target_sample", "drug", "unit", "batch_samples"}
 
 
 def discover_runs(root):

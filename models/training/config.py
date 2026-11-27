@@ -29,6 +29,9 @@ class TrainingConfig:
     n_target: int = 128
     min_cells: int = 128
     passes_per_cell_line: int = 5
+    batch_size: int = 2
+    checkpoint_layers: bool = True
+    accumulate_batches: bool = False  # legacy resume only; new runs update every forward batch
     batches_per_unit: int = 2
     file_cache: int = 6
     val_cell_lines: int = 2
@@ -39,6 +42,8 @@ class TrainingConfig:
     dropout: float = 0.1
     normalization: str = "layernorm"
     gene_statistics: bool = True
+    chem_skip_gate: bool = True
+    chem_skip_init: float = 0.1
     chem_ffn_residual: bool = True
     attention_normalization: bool = True
     gene_residual: bool = True
@@ -72,6 +77,12 @@ class TrainingConfig:
                     "min_cells", "passes_per_cell_line", "batches_per_unit", "file_cache"):
             if getattr(self, key) <= 0:
                 raise ValueError(f"{key} must be positive")
+        if isinstance(self.batch_size, bool) or not isinstance(self.batch_size, int) or self.batch_size < 1:
+            raise ValueError("batch_size must be a positive integer")
+        if not isinstance(self.accumulate_batches, bool):
+            raise ValueError("accumulate_batches must be a boolean")
+        if not isinstance(self.checkpoint_layers, bool):
+            raise ValueError("checkpoint_layers must be a boolean")
         if self.head_dim is not None and (self.dim != self.heads * self.head_dim or self.conc_dim != self.head_dim):
             raise ValueError("dim must equal heads * head_dim and conc_dim must equal head_dim")
         if self.dim < 4 or self.layers < 0:
@@ -84,6 +95,11 @@ class TrainingConfig:
             raise ValueError("ffn_multiplier must be a positive integer")
         if not isinstance(self.joint_normalization, bool):
             raise ValueError("joint_normalization must be a boolean")
+        if not isinstance(self.chem_skip_gate, bool):
+            raise ValueError("chem_skip_gate must be a boolean")
+        if (isinstance(self.chem_skip_init, bool) or not isinstance(self.chem_skip_init, (int, float))
+                or not 0 < self.chem_skip_init < 1):
+            raise ValueError("chem_skip_init must be finite and strictly between 0 and 1")
         if not isinstance(self.chem_ffn_residual, bool):
             raise ValueError("chem_ffn_residual must be a boolean")
         if not isinstance(self.gene_residual, bool):
@@ -119,11 +135,11 @@ def parse_args(argv=None, *, single=False):
     parser.add_argument("--resume", default="", help="Run folder or last.pt; --epochs adds epochs")
     parser.add_argument("--dry-run", action="store_true", help="Inspect selection and one batch; no run saved")
     for flag in ("head-dim", "heads", "layers", "ffn-multiplier", "epochs", "n-control", "n-target",
-                 "min-cells", "passes-per-cell-line", "batches-per-unit", "file-cache",
+                 "min-cells", "passes-per-cell-line", "batches-per-unit", "batch-size", "file-cache",
                  "val-cell-lines", "val-plates", "query-chunk", "readout-chunk", "seed",
                  "save-every", "max-steps", "max-units-per-epoch"):
         parser.add_argument(f"--{flag}", type=int, default=None)
-    for flag in ("lr", "weight-decay", "grad-clip", "dropout", "scale-exponent"):
+    for flag in ("lr", "weight-decay", "grad-clip", "dropout", "scale-exponent", "chem-skip-init"):
         parser.add_argument(f"--{flag}", type=float, default=None)
     parser.add_argument("--amp", choices=("off", "bf16"), default=None)
     parser.add_argument("--chem-tokens", choices=("all", "atoms"), default=None)
@@ -134,6 +150,10 @@ def parse_args(argv=None, *, single=False):
                         help="new-run ablation: normalize concatenated gene/chemical features before KQV")
     parser.add_argument("--no-gene-stats", dest="gene_statistics", action="store_false", default=None,
                         help="new-run ablation: omit the five log-expression statistics")
+    parser.add_argument("--no-checkpoint-layers", dest="checkpoint_layers", action="store_false", default=None,
+                        help="disable attention-layer activation recomputation for a new run")
+    parser.add_argument("--no-chem-skip-gate", dest="chem_skip_gate", action="store_false", default=None,
+                        help="new-run ablation: disable the learnable direct chemical skip")
     parser.add_argument("--no-chem-ffn-residual", dest="chem_ffn_residual", action="store_false", default=None,
                         help="new-run ablation: disable the chemical attention FFN residual")
     parser.add_argument("--no-gene-residual", dest="gene_residual", action="store_false", default=None,
@@ -142,9 +162,9 @@ def parse_args(argv=None, *, single=False):
     if args.resume:
         # Resume keeps the saved architecture; epochs and clipping are explicit policies.
         supplied = {k: v for k, v in vars(args).items()
-                    if k not in ("resume", "epochs", "grad_clip", "dry_run") and v is not None}
+                    if k not in ("resume", "epochs", "grad_clip", "batch_size", "dry_run") and v is not None}
         if supplied or args.dry_run:
-            parser.error("With --resume, supply only --epochs and optionally --grad-clip")
+            parser.error("With --resume, supply only --epochs and optionally --grad-clip or --batch-size")
         return args, None
     values = {k: v for k, v in vars(args).items()
               if k not in ("resume", "dry_run") and v is not None}

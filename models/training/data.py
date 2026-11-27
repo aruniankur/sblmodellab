@@ -75,7 +75,8 @@ def make_plan(cfg):
                 gene_names = names
             elif names != gene_names:
                 raise ValueError(f"Gene identity/order mismatch: {record['path']}")
-            files.append({**record, "target_samples": [w.sample for w in targets(backed, cfg)]})
+            files.append({**record, "target_samples": [w.sample for w in targets(backed, cfg)],
+                          "target_drugs": {w.sample: w.drug for w in targets(backed, cfg)}})
         finally:
             backed.close()
     if not files:
@@ -107,10 +108,27 @@ def epoch_units(plan, cfg, rng):
     units = []
     for record in ordered:
         samples = record["target_samples"]
-        count = len(samples) if cfg.mode == "single" else min(cfg.batches_per_unit, len(samples))
+        count = len(samples) if cfg.mode == "single" else min(
+            cfg.batches_per_unit if cfg.accumulate_batches else max(cfg.batch_size, cfg.batches_per_unit), len(samples))
         selected = [samples[int(i)] for i in rng.choice(len(samples), count, replace=False)]
-        if cfg.mode == "single":
-            units.extend({**record, "samples": [sample]} for sample in selected)
+        if cfg.batch_size > 1 and record.get("target_drugs"):
+            # Prefer different chemicals within each forward batch when available.
+            # Keep each well unique and do not change legacy batch-size-one RNG.
+            pool = list(selected)
+            if cfg.mode != "single":
+                extra = [sample for sample in samples if sample not in pool]
+                rng.shuffle(extra)
+                pool.extend(extra)
+            chosen = []
+            drugs = record["target_drugs"]
+            while len(chosen) < count:
+                used = {drugs[s] for s in chosen[len(chosen) // cfg.batch_size * cfg.batch_size:]}
+                pick = next((i for i, sample in enumerate(pool) if drugs[sample] not in used), 0)
+                chosen.append(pool.pop(pick))
+            selected = chosen
+        if cfg.mode == "single" or not cfg.accumulate_batches:
+            units.extend({**record, "samples": selected[i:i + cfg.batch_size]}
+                         for i in range(0, len(selected), cfg.batch_size))
         else:
             units.append({**record, "samples": selected})
     return units[:cfg.max_units_per_epoch] if cfg.max_units_per_epoch else units

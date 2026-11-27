@@ -42,6 +42,16 @@ class LiveReaderTests(unittest.TestCase):
 
     def tearDown(self):self.temporary.cleanup()
 
+    def test_two_well_batch_metadata_remains_text(self):
+        path=self.root/'batch.csv'
+        details=json.dumps([dict(drug='A',loss=1.),dict(drug='B',loss=3.)])
+        with path.open('w',newline='',encoding='utf-8') as stream:
+            writer=csv.writer(stream);writer.writerow(HEADER+['batch_size','batch_samples'])
+            writer.writerow([1,1,1,'plate1_A.h5ad',1,'A',2.,2.,.5,.2,1.2,2,details])
+        row=LiveLogReader().poll(path).frame.iloc[0]
+        self.assertEqual(row['batch_size'],2)
+        self.assertEqual(json.loads(row['batch_samples'])[1]['drug'],'B')
+
     def test_incremental_append_and_partial_last_record(self):
         run=make_run(self.root);path=run/'log.csv';reader=LiveLogReader()
         self.assertEqual(len(reader.poll(path).frame),1)

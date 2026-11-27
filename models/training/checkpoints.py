@@ -11,7 +11,7 @@ import torch
 
 from models.training.config import TRAINED_ROOT
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
 
 
 def write_json(path, value):
@@ -44,7 +44,7 @@ def checkpoint_path(value):
 def load_checkpoint(value):
     path = checkpoint_path(value)
     state = torch.load(path, map_location="cpu", weights_only=False)
-    if state.get("schema_version") not in (1, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION):
+    if state.get("schema_version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, SCHEMA_VERSION):
         raise ValueError("This checkpoint predates the organized pipeline; start a new run")
     if state["schema_version"] == 1:
         # Older runs have no norm parameters or matching optimizer/CSV groups.
@@ -89,6 +89,19 @@ def load_checkpoint(value):
         state["config"].setdefault("joint_normalization", has_joint_norm if weights else True)
     elif "ffn_multiplier" not in state["config"] or "joint_normalization" not in state["config"]:
         raise ValueError("Checkpoint is missing FFN-width or joint-normalization architecture settings")
+    if state["schema_version"] < 9:
+        # Old runs have no gate parameters, optimizer slots or CSV gradient groups.
+        state["config"].setdefault("chem_skip_gate", False)
+        state["config"].setdefault("chem_skip_init", 0.1)
+    elif "chem_skip_gate" not in state["config"] or "chem_skip_init" not in state["config"]:
+        raise ValueError("Checkpoint is missing chemical-skip-gate architecture settings")
+    if state["schema_version"] < 10:
+        # Preserve old one-well forwards, accumulation, CSV and RNG continuation.
+        state["config"].setdefault("batch_size", 1)
+        state["config"].setdefault("checkpoint_layers", False)
+        state["config"].setdefault("accumulate_batches", True)
+    elif "batch_size" not in state["config"] or "checkpoint_layers" not in state["config"] or "accumulate_batches" not in state["config"]:
+        raise ValueError("Checkpoint is missing its forward batch_size or checkpoint_layers setting")
     return path.parent, state
 
 

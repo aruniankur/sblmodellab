@@ -15,6 +15,8 @@ conc_dim : concentration / co-expression bottleneck width
 d   : per-head width (``dim // num_heads``)
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -90,13 +92,15 @@ class ExternalPerturbAttention(nn.Module):
     Chemical states are normalised once by the parent model before the stack.
     Separate Q/K/V projections are normalised over dim before splitting heads;
     Chemical attention has an optional residual around its FFN, followed by
-    normalization. The gene update is normalized after its residual addition.
+    normalization. An optional per-layer sigmoid gate adds chemical context
+    directly to the gene update before post-residual normalization.
     """
 
     def __init__(self, dim: int, num_heads: int = 8, dropout: float = 0.1,
                  normalization: bool = True, attention_normalization: bool = True,
                  chem_ffn_residual: bool = True, ffn_multiplier: int = 2,
-                 joint_normalization: bool = False):
+                 joint_normalization: bool = False, chem_skip_gate: bool = True,
+                 chem_skip_init: float = 0.1):
         super().__init__()
 
         assert dim % num_heads == 0, "dim must be divisible by num_heads"
@@ -104,6 +108,16 @@ class ExternalPerturbAttention(nn.Module):
         if isinstance(ffn_multiplier, bool) or not isinstance(ffn_multiplier, int) or ffn_multiplier < 1:
             raise ValueError("ffn_multiplier must be a positive integer")
         ffn_dim = dim * ffn_multiplier
+        if not isinstance(chem_skip_gate, bool):
+            raise ValueError("chem_skip_gate must be a boolean")
+        if (isinstance(chem_skip_init, bool) or not isinstance(chem_skip_init, (int, float))
+                or not 0 < chem_skip_init < 1):
+            raise ValueError("chem_skip_init must be finite and strictly between 0 and 1")
+        # One scalar per block. Sigmoid bounds the direct chemical contribution.
+        if chem_skip_gate:
+            self.chem_skip_gate_logit = nn.Parameter(torch.tensor(math.log(chem_skip_init / (1 - chem_skip_init))))
+        else:
+            self.register_parameter("chem_skip_gate_logit", None)
 
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -209,7 +223,11 @@ class ExternalPerturbAttention(nn.Module):
         )
 
         gene_context = self.merge_heads(gene_context)
-        gene_context = self.gene_ffn_norm(self.gene_ffn(gene_context) + x)
+        gene_update = self.gene_ffn(gene_context) + x
+        if self.chem_skip_gate_logit is not None:
+            gate = self.chem_skip_gate_logit.sigmoid().to(chem_context.dtype)
+            gene_update = gene_update + gate * chem_context
+        gene_context = self.gene_ffn_norm(gene_update)
 
         return gene_context
 
@@ -258,9 +276,13 @@ class PerturbationModel(nn.Module):
         chem_ffn_residual: bool = True,
         ffn_multiplier: int = 2,
         joint_normalization: bool = False,
+        chem_skip_gate: bool = True,
+        chem_skip_init: float = 0.1,
+        checkpoint_layers: bool = True,
     ):
         super().__init__()
 
+        self.use_checkpoint_layers = checkpoint_layers
         self.num_genes = num_of_genes
         self.use_gene_statistics = gene_statistics
         self.use_gene_residual = gene_residual
@@ -281,6 +303,8 @@ class PerturbationModel(nn.Module):
                     chem_ffn_residual=chem_ffn_residual,
                     ffn_multiplier=ffn_multiplier,
                     joint_normalization=joint_normalization,
+                    chem_skip_gate=chem_skip_gate,
+                    chem_skip_init=chem_skip_init,
                 )
                 for _ in range(num_layers)
             ]
@@ -375,7 +399,10 @@ class PerturbationModel(nn.Module):
 
         # --- part 2: chemical-conditioned layer stack ---
         for layer in self.layers:
-            gene_states = layer(gene_states, chem_embeddings, chem_mask)
+            if self.use_checkpoint_layers and self.training and torch.is_grad_enabled():
+                gene_states = checkpoint(layer, gene_states, chem_embeddings, chem_mask, use_reentrant=False)
+            else:
+                gene_states = layer(gene_states, chem_embeddings, chem_mask)
 
         gene_states = self.final_norm(gene_states)
 
