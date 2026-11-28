@@ -28,6 +28,8 @@ class TrainingConfig:
     n_control: int = 512
     n_target: int = 128
     min_cells: int = 128
+    sampling_strategy: str = "class_rotation"
+    chemical_classes: str = str(MODELS_ROOT.parent / "Chemcial_info" / "drug_cluster_labels_k8.json")
     passes_per_cell_line: int = 5
     batch_size: int = 2
     checkpoint_layers: bool = True
@@ -72,6 +74,10 @@ class TrainingConfig:
         self.conc_dim = head_dim
 
     def validate(self):
+        if self.sampling_strategy not in ("class_rotation", "legacy"):
+            raise ValueError("sampling_strategy must be class_rotation or legacy")
+        if self.model_type == "full" and self.mode == "all" and self.sampling_strategy == "class_rotation" and self.accumulate_batches:
+            raise ValueError("Class rotation requires one optimizer update per forward batch")
         if self.model_type not in ("full", "control") or self.mode not in ("all", "single"):
             raise ValueError("Choose full/control model and all/single training mode")
         for key in ("dim", "conc_dim", "heads", "epochs", "n_control", "n_target",
@@ -147,6 +153,8 @@ def parse_args(argv=None, *, single=False):
     parser.add_argument("--amp", choices=("off", "bf16"), default=None)
     parser.add_argument("--chem-tokens", choices=("all", "atoms"), default=None)
     parser.add_argument("--atom-cache", default=None)
+    parser.add_argument("--sampling-strategy", choices=("class_rotation", "legacy"), default=None)
+    parser.add_argument("--chemical-classes", default=None)
     parser.add_argument("--normalization", choices=("layernorm", "none"), default=None,
                         help="new-run normalization; none enables an architecture ablation")
     parser.add_argument("--no-gene-stats", dest="gene_statistics", action="store_false", default=None,

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+import json
+import hashlib
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +20,8 @@ class DataPlan:
     val_lines: list[str]
     n_genes: int
     gene_names: list[str]
+    chemical_classes: dict = field(default_factory=dict)
+    class_mapping_hash: str = ""
 
     def to_dict(self):
         return vars(self)
@@ -76,7 +80,8 @@ def make_plan(cfg):
             elif names != gene_names:
                 raise ValueError(f"Gene identity/order mismatch: {record['path']}")
             files.append({**record, "target_samples": [w.sample for w in targets(backed, cfg)],
-                          "target_drugs": {w.sample: w.drug for w in targets(backed, cfg)}})
+                          "target_drugs": {w.sample: w.drug for w in targets(backed, cfg)},
+                          "control_samples": [w.sample for w in backed.control_wells]})
         finally:
             backed.close()
     if not files:
@@ -86,12 +91,27 @@ def make_plan(cfg):
     if cfg.model_type == "full" and cfg.mode == "all":
         rng = np.random.default_rng(cfg.seed)
         val = sorted(rng.permutation(lines)[:min(cfg.val_cell_lines, len(lines) - 1)].tolist())
-    return DataPlan(files, [line for line in lines if line not in val], val,
+    plan = DataPlan(files, [line for line in lines if line not in val], val,
                     len(gene_names), gene_names)
+    if cfg.model_type == "full" and cfg.mode == "all" and cfg.sampling_strategy == "class_rotation":
+        payload = json.loads(Path(cfg.chemical_classes).read_text(encoding="utf-8"))
+        plan.chemical_classes = payload["classes"]
+        if not plan.chemical_classes or any(type(v) is not int or not 1 <= v <= 8 for v in plan.chemical_classes.values()):
+            raise ValueError("Chemical mapping must contain integer classes 1..8")
+        needed = {d for r in files if r["cell_line"] in plan.train_lines for d in r["target_drugs"].values()}
+        missing = needed - plan.chemical_classes.keys()
+        if missing:
+            raise ValueError(f"Chemical class mapping is missing training drugs: {sorted(missing)}")
+        plan.class_mapping_hash = hashlib.sha256(json.dumps(plan.chemical_classes, sort_keys=True).encode()).hexdigest()
+    return plan
 
 
-def epoch_units(plan, cfg, rng):
-    """Five distinct available plates per line; single mode visits all target wells."""
+def epoch_units(plan, cfg, rng, sampler_state=None):
+    """Class rotation for new full runs; preserve legacy and single-file schedules."""
+    if cfg.model_type == "full" and cfg.mode == "all" and cfg.sampling_strategy == "class_rotation":
+        if sampler_state is None:
+            raise ValueError("Class rotation requires persistent sampler_state")
+        return class_rotation_units(plan, cfg, rng, sampler_state)
     records = []
     for line in plan.train_lines:
         available = [r for r in plan.files if r["cell_line"] == line]
@@ -143,8 +163,68 @@ def validation_units(plan, cfg):
     return units
 
 
-def sample_example(backed, sample, cfg, rng, index=0):
+def sample_example(backed, sample, cfg, rng, index=0, control_sample=None):
     """Cross-well sampling is allowed; cross-file/plate/line sampling is impossible."""
     target = next(w for w in targets(backed, cfg) if w.sample == sample)
-    control = backed.control_wells[index % len(backed.control_wells)]
+    control = (next(w for w in backed.control_wells if w.sample == control_sample)
+               if control_sample is not None else backed.control_wells[index % len(backed.control_wells)])
     return build_example(backed, control, target, cfg.n_control, cfg.n_target, rng)
+
+
+def class_rotation_units(plan, cfg, rng, sampler_state):
+    """One same-file batch per epoch; rotate least-exposed classes/drugs/wells.
+
+    Counters describe the saved planned schedule. The engine checkpoints them
+    together with that schedule and its execution cursor, including mid-epoch.
+    """
+    records = [r for r in plan.files if r["cell_line"] in plan.train_lines]
+    by_plate = {}
+    for record in records:
+        by_plate.setdefault(record["plate"], []).append(record)
+    ordered = []
+    for plate in rng.permutation(sorted(by_plate)):
+        group = by_plate[int(plate)]
+        ordered.extend(group[int(i)] for i in rng.permutation(len(group)))
+    if cfg.max_units_per_epoch:
+        ordered = ordered[:cfg.max_units_per_epoch]
+    states = sampler_state.setdefault("files", {})
+    global_drugs = sampler_state.setdefault("drugs", {})
+    units = []
+    for record in ordered:
+        state = states.setdefault(record["path"], {"classes": {}, "drugs": {}, "wells": {}})
+        candidates = list(record["target_samples"])
+        drugs = record["target_drugs"]
+        classes = plan.chemical_classes
+        chosen, used_classes, used_drugs = [], set(), set()
+        for _ in range(min(cfg.batch_size, len(candidates))):
+            available = {classes[drugs[s]] for s in candidates}
+            options = available - used_classes
+            if not options:
+                used_classes.clear()
+                options = available
+            lowest = min(state["classes"].get(str(c), 0) for c in options)
+            options = sorted(c for c in options if state["classes"].get(str(c), 0) == lowest)
+            cls = options[int(rng.integers(len(options)))]
+            pool = [s for s in candidates if classes[drugs[s]] == cls]
+            novel = [s for s in pool if drugs[s] not in used_drugs]
+            pool = novel or pool
+            def exposure(sample):
+                drug = drugs[sample]
+                return (state["drugs"].get(drug, 0), global_drugs.get(drug, 0),
+                        state["wells"].get(sample, 0))
+            best = min(exposure(s) for s in pool)
+            pool = [s for s in pool if exposure(s) == best]
+            sample = pool[int(rng.integers(len(pool)))]; drug = drugs[sample]
+            candidates.remove(sample); chosen.append(sample)
+            used_classes.add(cls); used_drugs.add(drug)
+            for counts, key in ((state["classes"], str(cls)), (state["drugs"], drug),
+                                (state["wells"], sample), (global_drugs, drug)):
+                counts[key] = counts.get(key, 0) + 1
+        controls = record["control_samples"]
+        control_order = []
+        while len(control_order) < len(chosen):
+            control_order.extend(controls[int(i)] for i in rng.permutation(len(controls)))
+        units.append({**record, "samples": chosen,
+                      "selected_controls": control_order[:len(chosen)],
+                      "chemical_classes": [classes[drugs[s]] for s in chosen]})
+    return units

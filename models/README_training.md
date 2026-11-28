@@ -46,10 +46,15 @@ For both models, context and target always belong to the **same plate and cell
 line**. Different DMSO wells and overlapping cells are allowed. All training is
 restricted to plates **1-12**, including single-file training.
 
-- **All-file mode:** sample five distinct available plates per training cell line
-  per epoch. Select up to `max(batch_size, batches_per_unit)` target wells per file
-  and group them into forward batches of at most B wells. Every batch has one
-  backward pass and one optimizer update; new runs do not accumulate gradients.
+- **Full all-file mode (new runs):** visit every eligible training plate/cell-line
+  file once per epoch. Select one batch of up to B treatment wells, rotating
+  among the least-exposed available MolFormer classes, then chemicals and wells.
+  B=2 uses different classes whenever at least two are available. Each item uses
+  a DMSO well from that same file; DMSO assignment is shuffled without replacement
+  before cycling. One forward/backward batch produces one optimizer update.
+- **Legacy/control all-file mode:** select five distinct available plates per
+  training cell line and up to `max(batch_size, batches_per_unit)` target wells
+  per file. `--sampling-strategy legacy` selects this schedule for a new full run.
 - **Single-file mode:** visit every eligible target well in the chosen file once
   per epoch, in random order, grouped into B-well batches. Each forward batch
   has one backward pass and one optimizer update.
@@ -416,3 +421,31 @@ through the compatibility-only `legacy_attention_norms` setting.
 New full-model runs also pass the final block output directly to the coordinate
 readout, without an additional final LayerNorm. Legacy checkpoint resumes retain
 the historical final norm and its saved affine parameters.
+
+
+### Eight-class sampling (schema 12)
+
+New full all-file runs default to `sampling_strategy=class_rotation`.
+The frozen mapping is `Chemcial_info/drug_cluster_labels_k8.json`; override with
+`--chemical-classes PATH` for an explicitly prepared mapping. Unknown training
+drugs fail indexing rather than being silently assigned a class. The mapping and
+its hash are stored in the plan. No clustering runs during training or resume.
+The approved 367-drug membership is preserved; other library drugs are assigned
+to the nearest frozen centroid for alternate training splits.
+
+For the current split, B=2 means 550 updates and 1,100 treatment presentations
+per epoch, with every available class in each file covered within four complete
+epochs. Files with missing classes use only their available classes; one-class
+files may repeat a class within a batch. Wells remain unique within a batch.
+Short files yield short batches. B stays configurable; larger batches rotate
+through available classes before repeating a class. Control wells cycle when
+B exceeds their count. Control cells are never pooled across lines or plates.
+
+Class/drug/well rotation counts are saved in `progress.sampler_state`, together
+with the planned epoch units and their execution cursor. Counts describe planned
+exposure, including pending units; completed exposure can be read from the CSV.
+Each `batch_samples` entry includes its chemical class and actual control well.
+Existing schema 1–11 resumes retain their original sampler. Single-file and
+control-model schedules remain unchanged. `passes_per_cell_line` and
+`batches_per_unit` no longer set the new full training epoch size; the latter
+still determines the fixed validation well count. Validation inputs are unchanged.

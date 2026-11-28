@@ -65,7 +65,7 @@ class PipelineTests(unittest.TestCase):
         return path
 
     def cfg(self, **values):
-        defaults = dict(model_type="control", root=str(self.data), dim=16, conc_dim=4,
+        defaults = dict(sampling_strategy="legacy", model_type="control", root=str(self.data), dim=16, conc_dim=4,
                         heads=2, layers=1, epochs=1, batch_size=1, accumulate_batches=True, n_control=8, n_target=8, min_cells=2,
                         passes_per_cell_line=1, batches_per_unit=2, file_cache=2,
                         query_chunk=5, readout_chunk=3, amp="off", dropout=0., grad_clip=3., save_every=1)
@@ -185,7 +185,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("t_mean_loss=", stream.getvalue())
         self.assertIn("i_mean_loss=", stream.getvalue())
         _, state = load_checkpoint(run)
-        self.assertEqual(state["schema_version"], 11)
+        self.assertEqual(state["schema_version"], 12)
 
     def test_full_single_training_and_additional_epoch_resume(self):
         cfg = self.cfg(model_type="full", mode="single", file=str(self.data / "plate1_A.h5ad"))
@@ -300,7 +300,7 @@ class PipelineTests(unittest.TestCase):
             model.load_state_dict(restored["model"], strict=True)
             train(resume=str(run), additional_epochs=1)
         _, resumed = load_checkpoint(run)
-        self.assertEqual(resumed["schema_version"], 11)
+        self.assertEqual(resumed["schema_version"], 12)
         self.assertEqual(resumed["config"]["normalization"], "none")
         self.assertEqual(resumed["progress"]["epoch"], 2)
         self.assertFalse(any("norm." in key for key in resumed["model"]))
@@ -318,7 +318,7 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(restored["model"]["merger.weight"].shape[1], 20)
             train(resume=str(run), additional_epochs=1)
         _, resumed = load_checkpoint(run)
-        self.assertEqual(resumed["schema_version"], 11)
+        self.assertEqual(resumed["schema_version"], 12)
         self.assertFalse(resumed["config"]["gene_statistics"])
         self.assertEqual(resumed["model"]["merger.weight"].shape[1], 20)
         self.assertEqual(resumed["progress"]["epoch"], 2)

@@ -116,7 +116,9 @@ def train(cfg=None, *, resume="", additional_epochs=None, grad_clip=None, batch_
             if progress["units"] is not None:
                 done = progress["units"][:progress["cursor"]]
                 pending = progress["units"][progress["cursor"]:]
-                progress["units"] = done + [{**unit, "samples": unit["samples"][i:i + batch_size]}
+                progress["units"] = done + [{**unit, "samples": unit["samples"][i:i + batch_size],
+                    **({"selected_controls": unit["selected_controls"][i:i + batch_size]} if "selected_controls" in unit else {}),
+                    **({"chemical_classes": unit["chemical_classes"][i:i + batch_size]} if "chemical_classes" in unit else {})}
                     for unit in pending for i in range(0, len(unit["samples"]), batch_size)]
 
         # An incomplete current epoch counts as the first additional epoch.
@@ -186,7 +188,7 @@ def train(cfg=None, *, resume="", additional_epochs=None, grad_clip=None, batch_
         print(f"Run: {run_dir}\nModel: {cfg.model_type}; mode: {cfg.mode}; "
               f"train cell lines: {len(plan.train_lines)}; validation lines: {plan.val_lines}; "
               f"genes: {plan.n_genes}; parameters: {sum(groups.values()):,}; normalization: {cfg.normalization}; "
-              f"forward batch size: {cfg.batch_size}")
+              f"forward batch size: {cfg.batch_size}; sampler: {cfg.sampling_strategy}")
         if cfg.model_type == "control":
             print("DMSO-only reconstruction. Head sizing sets width/bottleneck; layers/dropout are inactive.")
         cache = FileCache(cfg.file_cache)
@@ -211,7 +213,7 @@ def train(cfg=None, *, resume="", additional_epochs=None, grad_clip=None, batch_
         while progress["epoch"] < cfg.epochs:
             epoch_start = time.perf_counter()
             if progress["units"] is None:
-                progress["units"] = epoch_units(plan, cfg, rng)
+                progress["units"] = epoch_units(plan, cfg, rng, progress.setdefault("sampler_state", {}))
             units = progress["units"]
             remaining = units[progress["cursor"]:]
             pass_total = sum(math.ceil(len(u["samples"]) / cfg.batch_size) for u in units)
@@ -230,7 +232,9 @@ def train(cfg=None, *, resume="", additional_epochs=None, grad_clip=None, batch_
                         if device.type == "cuda":
                             torch.cuda.reset_peak_memory_stats(device)
                         samples = unit["samples"][offset:offset + cfg.batch_size]
-                        examples = [sample_example(backed, sample, cfg, rng, offset + index)
+                        examples = [sample_example(backed, sample, cfg, rng, offset + index,
+                                    control_sample=(unit["selected_controls"][offset + index]
+                                                    if "selected_controls" in unit else None))
                                     for index, sample in enumerate(samples)]
                         size = len(examples)
                         previous = ({name: p.grad.detach().clone() for name, p in model.named_parameters()
@@ -254,7 +258,9 @@ def train(cfg=None, *, resume="", additional_epochs=None, grad_clip=None, batch_
                         progress["backward_pass"] += 1
                         progress["passes_in_epoch"] += size  # wells, for weighted epoch loss
                         progress["loss_sum"] += sum(values)
-                        details = [{"control_sample": backed.control_wells[(offset + i) % len(backed.control_wells)].sample,
+                        details = [{"control_sample": (unit["selected_controls"][offset + i] if "selected_controls" in unit
+                                                       else backed.control_wells[(offset + i) % len(backed.control_wells)].sample),
+                                    "chemical_class": plan.chemical_classes.get(example.drug),
                                     "target_sample": samples[i], "drug": example.drug,
                                     "dose": example.concentration, "loss": values[i],
                                     "t_mean_loss": baselines[i][0], "i_mean_loss": baselines[i][1]}
