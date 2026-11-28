@@ -358,7 +358,7 @@ or checkpoint selection. The target mean is a target-derived constant reference.
 Schema 7 adds these CSV columns. On resume, old committed rows receive blank
 baseline fields; values cannot be reconstructed from historical scalar losses.
 
-Current full models use `ffn_multiplier=2` for both FFNs and disable joint normalization before gene KQV by default. Schema 8 records both settings; older checkpoints infer them from saved tensor shapes and parameter keys. CLI ablations: `--ffn-multiplier 4` and `--joint-normalization`.
+Current full models use `ffn_multiplier=2` for both FFNs and disable joint normalization before gene KQV by default. Schema 8 records both settings; older checkpoints infer them from saved tensor shapes and parameter keys. FFN width can be set with `--ffn-multiplier 4`. Query and joint normalization are bypassed in new runs; their settings are retained only for legacy checkpoints.
 
 
 New full runs also use a direct chemical skip in every attention block:
@@ -402,3 +402,17 @@ layer activations are recomputed during backward with dropout RNG preserved.
 saved behavior. The capacity benchmark uses the configured real forward B;
 use `python models/benchmark.py --batch-size 2` to measure your exact GPU and
 model configuration. Passing a small local test does not certify 48-GB fit.
+
+
+### Attention normalization in new runs (schema 11)
+
+New full-model blocks apply LayerNorm only to the chemical FFN update and
+post-residual gene FFN update. Projected chemical/gene Q, K and V are not
+normalized; the query-input norm is also removed. Parent-model normalization
+is unchanged. Start a new run to use this architecture. Resuming schema 1–10
+checkpoints preserves their original normalization and optimizer parameter order
+through the compatibility-only `legacy_attention_norms` setting.
+
+New full-model runs also pass the final block output directly to the coordinate
+readout, without an additional final LayerNorm. Legacy checkpoint resumes retain
+the historical final norm and its saved affine parameters.

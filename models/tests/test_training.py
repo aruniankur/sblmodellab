@@ -185,7 +185,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("t_mean_loss=", stream.getvalue())
         self.assertIn("i_mean_loss=", stream.getvalue())
         _, state = load_checkpoint(run)
-        self.assertEqual(state["schema_version"], 10)
+        self.assertEqual(state["schema_version"], 11)
 
     def test_full_single_training_and_additional_epoch_resume(self):
         cfg = self.cfg(model_type="full", mode="single", file=str(self.data / "plate1_A.h5ad"))
@@ -237,11 +237,10 @@ class PipelineTests(unittest.TestCase):
                      if isinstance(module, torch.nn.LayerNorm)}
             expected = {"merger_norm"}
             if model_type == "full":
-                expected |= {"chem_norm", "final_norm"}
+                expected |= {"chem_norm"}
+                self.assertFalse(hasattr(model, "final_norm"))
                 expected |= {f"layers.{i}.{name}" for i in range(2)
-                             for name in ("query_norm",
-                                          "chem_q_norm", "chem_k_norm", "chem_v_norm", "chem_ffn_norm",
-                                          "gene_q_norm", "gene_k_norm", "gene_v_norm", "gene_ffn_norm")}
+                             for name in ("chem_ffn_norm", "gene_ffn_norm")}
             self.assertEqual(set(norms), expected)
             for name, module in norms.items():
                 self.assertEqual(module.normalized_shape, (32,) if name.endswith("joint_norm") else (16,))
@@ -301,7 +300,7 @@ class PipelineTests(unittest.TestCase):
             model.load_state_dict(restored["model"], strict=True)
             train(resume=str(run), additional_epochs=1)
         _, resumed = load_checkpoint(run)
-        self.assertEqual(resumed["schema_version"], 10)
+        self.assertEqual(resumed["schema_version"], 11)
         self.assertEqual(resumed["config"]["normalization"], "none")
         self.assertEqual(resumed["progress"]["epoch"], 2)
         self.assertFalse(any("norm." in key for key in resumed["model"]))
@@ -319,7 +318,7 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(restored["model"]["merger.weight"].shape[1], 20)
             train(resume=str(run), additional_epochs=1)
         _, resumed = load_checkpoint(run)
-        self.assertEqual(resumed["schema_version"], 10)
+        self.assertEqual(resumed["schema_version"], 11)
         self.assertFalse(resumed["config"]["gene_statistics"])
         self.assertEqual(resumed["model"]["merger.weight"].shape[1], 20)
         self.assertEqual(resumed["progress"]["epoch"], 2)

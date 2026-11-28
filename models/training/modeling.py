@@ -17,6 +17,7 @@ def create_model(cfg, n_genes, chem_dim=None):
     if chem_dim is None:
         raise ValueError("Chemical feature width must be inferred from the token cache")
     return PerturbationModel(chem_dim=chem_dim, attention_normalization=cfg.attention_normalization,
+                             legacy_attention_norms=cfg.legacy_attention_norms,
                              chem_ffn_residual=cfg.chem_ffn_residual, ffn_multiplier=cfg.ffn_multiplier,
                              joint_normalization=cfg.joint_normalization,
                              chem_skip_gate=cfg.chem_skip_gate, chem_skip_init=cfg.chem_skip_init,

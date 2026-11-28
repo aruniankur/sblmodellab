@@ -295,7 +295,7 @@ Full all-file training holds out two eligible cell lines and evaluates their fir
 
 The loss is squared error summed over genes, averaged over cells/examples and divided by `num_genes ** 0.5`. Compare runs only when the loss definition, gene panel and evaluation samples are compatible.
 
-Gradient columns use eight decimal places and report each backward pass's contribution **before clipping**, with accumulation averaging undone. They are not the actual accumulated optimizer-step norm, so counting rows above 3 does not give the clipping rate. CSV formatting does not change tensor precision. The tqdm display and each CSV row also report `t_mean_loss` (the sampled target cells’ per-gene mean repeated across targets) and `i_mean_loss` (the sampled input DMSO cells’ per-gene mean). Both use the same loss formula and scale as `loss`; they are logging-only comparisons. `t_mean_loss` uses target data and is an optimistic constant-prediction reference. When resuming old logs, historical rows keep these fields blank; new rows include both values. There is no TensorBoard dependency; use tqdm and the dashboard.
+Gradient columns use eight decimal places and report each backward pass's contribution **before clipping**, with accumulation averaging undone. They are not the actual accumulated optimizer-step norm, so counting rows above 3 does not give the clipping rate. CSV formatting does not change tensor precision. The tqdm display and each CSV row also report `t_mean_loss` (the sampled target cellsï¿½ per-gene mean repeated across targets) and `i_mean_loss` (the sampled input DMSO cellsï¿½ per-gene mean). Both use the same loss formula and scale as `loss`; they are logging-only comparisons. `t_mean_loss` uses target data and is an optimistic constant-prediction reference. When resuming old logs, historical rows keep these fields blank; new rows include both values. There is no TensorBoard dependency; use tqdm and the dashboard.
 
 ## 10. Live dashboard in a second terminal
 
@@ -458,3 +458,7 @@ also works in training and benchmark CLIs; a resume B override switches old
 runs to per-batch updates. Logs include actual `batch_size` and JSON
 `batch_samples` with individual losses and baselines. Layer activation
 checkpointing saves VRAM by recomputing during backward.
+
+
+
+scp Aruni@10.171.14.143:C:\Users\Aruni\Documents\pertu\sblmodellab\models\trained_model_zips\model_20261127_202949_825123_full_export_20261128_105119_198206.zip "H:\mtp\Tahoe_100M_new\models\trained_model"

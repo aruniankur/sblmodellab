@@ -12,7 +12,8 @@ class ArchitectureCompatibilityTests(unittest.TestCase):
         for multiplier, joint in ((2, False), (4, True)):
             with self.subTest(multiplier=multiplier), tempfile.TemporaryDirectory() as directory:
                 cfg = TrainingConfig(model_type='full', heads=2, head_dim=8, layers=2,
-                                     dropout=0., ffn_multiplier=multiplier, joint_normalization=joint)
+                                     dropout=0., ffn_multiplier=multiplier, joint_normalization=joint,
+                                     legacy_attention_norms=True)
                 model = create_model(cfg, 12, 6).eval()
                 self.assertEqual(model.layers[0].chem_ffn[0].out_features, cfg.dim * multiplier)
                 self.assertEqual(isinstance(model.layers[0].joint_norm, torch.nn.LayerNorm), joint)

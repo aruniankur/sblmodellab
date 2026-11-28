@@ -88,9 +88,9 @@ class ExternalPerturbAttention(nn.Module):
     Stage 2 (gene self-attention)
         q/k/v <- cat([genes, chemical context])  (no mask)
 
-    Gene queries are pre-normalised when enabled; joint pre-normalization is optional.
+    New blocks normalize only the chemical and gene FFN updates.
     Chemical states are normalised once by the parent model before the stack.
-    Separate Q/K/V projections are normalised over dim before splitting heads;
+    Projected Q/K/V go directly to head splitting without normalization.
     Chemical attention has an optional residual around its FFN, followed by
     normalization. An optional per-layer sigmoid gate adds chemical context
     directly to the gene update before post-residual normalization.
@@ -100,7 +100,7 @@ class ExternalPerturbAttention(nn.Module):
                  normalization: bool = True, attention_normalization: bool = True,
                  chem_ffn_residual: bool = True, ffn_multiplier: int = 2,
                  joint_normalization: bool = False, chem_skip_gate: bool = True,
-                 chem_skip_init: float = 0.1):
+                 chem_skip_init: float = 0.1, legacy_attention_norms: bool = False):
         super().__init__()
 
         assert dim % num_heads == 0, "dim must be divisible by num_heads"
@@ -124,21 +124,25 @@ class ExternalPerturbAttention(nn.Module):
         self.dropout = dropout
         self.use_chem_ffn_residual = chem_ffn_residual
 
-        # Separate full-width norms after projections and FFNs, before head splitting.
+        # FFN norms remain; projected Q/K/V norms exist only for old checkpoints.
         norm = lambda: nn.LayerNorm(dim) if normalization and attention_normalization else nn.Identity()
-        self.chem_q_norm = norm()
-        self.chem_k_norm = norm()
-        self.chem_v_norm = norm()
+        self.legacy_attention_norms = legacy_attention_norms
+        if legacy_attention_norms:
+            # Preserve historical registration order for saved AdamW slots.
+            self.chem_q_norm = norm()
+            self.chem_k_norm = norm()
+            self.chem_v_norm = norm()
         self.chem_ffn_norm = norm()
-        self.gene_q_norm = norm()
-        self.gene_k_norm = norm()
-        self.gene_v_norm = norm()
+        if legacy_attention_norms:
+            self.gene_q_norm = norm()
+            self.gene_k_norm = norm()
+            self.gene_v_norm = norm()
         self.gene_ffn_norm = norm()
 
         # --- stage 1: chemical -> gene cross attention ---
         self.kv_linear = nn.Linear(dim, dim * 2)
         self.q_linear = nn.Linear(dim, dim)
-        self.query_norm = nn.LayerNorm(dim) if normalization else nn.Identity()
+        self.query_norm = nn.LayerNorm(dim) if normalization and legacy_attention_norms else nn.Identity()
 
         self.chem_ffn = nn.Sequential(
             nn.Linear(dim, ffn_dim),
@@ -148,7 +152,7 @@ class ExternalPerturbAttention(nn.Module):
 
         # --- stage 2: gene -> gene self attention ---
         self.kqv = nn.Linear(dim * 2, dim * 3)
-        self.joint_norm = nn.LayerNorm(dim * 2) if normalization and joint_normalization else nn.Identity()
+        self.joint_norm = nn.LayerNorm(dim * 2) if normalization and legacy_attention_norms and joint_normalization else nn.Identity()
 
         self.gene_ffn = nn.Sequential(
             nn.Linear(dim, ffn_dim),
@@ -180,9 +184,12 @@ class ExternalPerturbAttention(nn.Module):
         key_value = self.kv_linear(chem_embeddings)
         keys, values = key_value.chunk(2, dim=-1)
 
-        queries = self.chem_q_norm(self.q_linear(self.query_norm(x)))
-        keys = self.chem_k_norm(keys)
-        values = self.chem_v_norm(values)
+        query_input = self.query_norm(x) if self.legacy_attention_norms else x
+        queries = self.q_linear(query_input)
+        if self.legacy_attention_norms:
+            queries = self.chem_q_norm(queries)
+            keys = self.chem_k_norm(keys)
+            values = self.chem_v_norm(values)
 
         queries = self.split_heads(queries)
         keys = self.split_heads(keys)
@@ -203,13 +210,17 @@ class ExternalPerturbAttention(nn.Module):
         chem_context = self.chem_ffn_norm(chem_update)
 
         # --- stage 2: genes attend over genes (chemically conditioned) ---
-        qkv = self.kqv(self.joint_norm(torch.cat([x, chem_context], dim=-1)))
+        joint_input = torch.cat([x, chem_context], dim=-1)
+        if self.legacy_attention_norms:
+            joint_input = self.joint_norm(joint_input)
+        qkv = self.kqv(joint_input)
 
         # NOTE: chunk order is (k, q, v) exactly as in the notebook.
         keys, queries, values = qkv.chunk(3, dim=-1)
-        keys = self.gene_k_norm(keys)
-        queries = self.gene_q_norm(queries)
-        values = self.gene_v_norm(values)
+        if self.legacy_attention_norms:
+            keys = self.gene_k_norm(keys)
+            queries = self.gene_q_norm(queries)
+            values = self.gene_v_norm(values)
 
         keys = self.split_heads(keys)
         queries = self.split_heads(queries)
@@ -279,9 +290,11 @@ class PerturbationModel(nn.Module):
         chem_skip_gate: bool = True,
         chem_skip_init: float = 0.1,
         checkpoint_layers: bool = True,
+        legacy_attention_norms: bool = False,
     ):
         super().__init__()
 
+        self.legacy_attention_norms = legacy_attention_norms
         self.use_checkpoint_layers = checkpoint_layers
         self.num_genes = num_of_genes
         self.use_gene_statistics = gene_statistics
@@ -300,6 +313,7 @@ class PerturbationModel(nn.Module):
                     dropout=dropout,
                     normalization=normalization,
                     attention_normalization=attention_normalization,
+                    legacy_attention_norms=legacy_attention_norms,
                     chem_ffn_residual=chem_ffn_residual,
                     ffn_multiplier=ffn_multiplier,
                     joint_normalization=joint_normalization,
@@ -320,7 +334,10 @@ class PerturbationModel(nn.Module):
 
         self.merger = nn.Linear(dim + conc_dim + (NUM_GENE_STATS if gene_statistics else 0), dim)
         self.merger_norm = nn.LayerNorm(dim) if normalization else nn.Identity()
-        self.final_norm = nn.LayerNorm(dim) if normalization else nn.Identity()
+        # Historical checkpoints include this affine LayerNorm. New runs use
+        # the final block output directly; its gene FFN update is already normalized.
+        if legacy_attention_norms:
+            self.final_norm = nn.LayerNorm(dim) if normalization else nn.Identity()
 
         self.coordi_layer = nn.Sequential(
             nn.Linear(dim + cell_coordi_dim, dim // 2),
@@ -404,7 +421,8 @@ class PerturbationModel(nn.Module):
             else:
                 gene_states = layer(gene_states, chem_embeddings, chem_mask)
 
-        gene_states = self.final_norm(gene_states)
+        if self.legacy_attention_norms:
+            gene_states = self.final_norm(gene_states)
 
         # --- part 3: coordinate-conditioned readout ---
         if readout_chunk is None:

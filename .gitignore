@@ -90,3 +90,7 @@ groups.json
 outputs
 # Local dashboard preview fixtures
 UIeval/.preview_runs/
+
+# Local report notes and model-improvement history
+/model_improvement_notes/
+run.md

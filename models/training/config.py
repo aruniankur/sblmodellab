@@ -23,7 +23,7 @@ class TrainingConfig:
     head_dim: int | None = None  # None preserves the architecture of legacy checkpoints
     layers: int = 1
     ffn_multiplier: int = 2
-    joint_normalization: bool = False
+    joint_normalization: bool = False  # legacy checkpoint architecture only
     epochs: int = 60
     n_control: int = 512
     n_target: int = 128
@@ -45,7 +45,8 @@ class TrainingConfig:
     chem_skip_gate: bool = True
     chem_skip_init: float = 0.1
     chem_ffn_residual: bool = True
-    attention_normalization: bool = True
+    legacy_attention_norms: bool = False  # checkpoint compatibility only
+    attention_normalization: bool = True  # chemical/gene FFN output norms
     gene_residual: bool = True
     scale_exponent: float = 0.5
     amp: str = "bf16"
@@ -95,6 +96,8 @@ class TrainingConfig:
             raise ValueError("ffn_multiplier must be a positive integer")
         if not isinstance(self.joint_normalization, bool):
             raise ValueError("joint_normalization must be a boolean")
+        if self.joint_normalization and not self.legacy_attention_norms:
+            raise ValueError("joint_normalization is disabled for new runs")
         if not isinstance(self.chem_skip_gate, bool):
             raise ValueError("chem_skip_gate must be a boolean")
         if (isinstance(self.chem_skip_init, bool) or not isinstance(self.chem_skip_init, (int, float))
@@ -146,8 +149,6 @@ def parse_args(argv=None, *, single=False):
     parser.add_argument("--atom-cache", default=None)
     parser.add_argument("--normalization", choices=("layernorm", "none"), default=None,
                         help="new-run normalization; none enables an architecture ablation")
-    parser.add_argument("--joint-normalization", action="store_true", default=None,
-                        help="new-run ablation: normalize concatenated gene/chemical features before KQV")
     parser.add_argument("--no-gene-stats", dest="gene_statistics", action="store_false", default=None,
                         help="new-run ablation: omit the five log-expression statistics")
     parser.add_argument("--no-checkpoint-layers", dest="checkpoint_layers", action="store_false", default=None,

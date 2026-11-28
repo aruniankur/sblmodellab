@@ -169,6 +169,7 @@ def train(cfg=None, *, resume="", additional_epochs=None, grad_clip=None, batch_
                            "uses_attention_stack": cfg.model_type == "full",
                            "normalization": cfg.normalization,
                            "attention_normalization": cfg.attention_normalization if cfg.model_type == "full" else False,
+                           "legacy_attention_norms": cfg.legacy_attention_norms if cfg.model_type == "full" else False,
                            "chem_skip_gate": cfg.chem_skip_gate if cfg.model_type == "full" else False,
                            "chem_skip_init": cfg.chem_skip_init if cfg.model_type == "full" and cfg.chem_skip_gate else None,
                            "chem_ffn_residual": cfg.chem_ffn_residual if cfg.model_type == "full" else False,

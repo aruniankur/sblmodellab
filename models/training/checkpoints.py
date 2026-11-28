@@ -11,7 +11,7 @@ import torch
 
 from models.training.config import TRAINED_ROOT
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 def write_json(path, value):
@@ -44,7 +44,7 @@ def checkpoint_path(value):
 def load_checkpoint(value):
     path = checkpoint_path(value)
     state = torch.load(path, map_location="cpu", weights_only=False)
-    if state.get("schema_version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, SCHEMA_VERSION):
+    if state.get("schema_version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, SCHEMA_VERSION):
         raise ValueError("This checkpoint predates the organized pipeline; start a new run")
     if state["schema_version"] == 1:
         # Older runs have no norm parameters or matching optimizer/CSV groups.
@@ -102,6 +102,10 @@ def load_checkpoint(value):
         state["config"].setdefault("accumulate_batches", True)
     elif "batch_size" not in state["config"] or "checkpoint_layers" not in state["config"] or "accumulate_batches" not in state["config"]:
         raise ValueError("Checkpoint is missing its forward batch_size or checkpoint_layers setting")
+    if state["schema_version"] < 11:
+        state["config"].setdefault("legacy_attention_norms", True)
+    elif "legacy_attention_norms" not in state["config"]:
+        raise ValueError("Checkpoint is missing its legacy-attention-norms setting")
     return path.parent, state
 
 
