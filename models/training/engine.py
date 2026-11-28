@@ -189,6 +189,17 @@ def train(cfg=None, *, resume="", additional_epochs=None, grad_clip=None, batch_
               f"train cell lines: {len(plan.train_lines)}; validation lines: {plan.val_lines}; "
               f"genes: {plan.n_genes}; parameters: {sum(groups.values()):,}; normalization: {cfg.normalization}; "
               f"forward batch size: {cfg.batch_size}; sampler: {cfg.sampling_strategy}")
+        if cfg.model_type == "full" and cfg.mode == "all":
+            training_files = sum(r["cell_line"] in plan.train_lines for r in plan.files)
+            heldout_files = sum(r["cell_line"] in plan.val_lines for r in plan.files)
+            if cfg.sampling_strategy == "class_rotation":
+                planned_updates = min(training_files, cfg.max_units_per_epoch) if cfg.max_units_per_epoch else training_files
+                print(f"Class rotation: {training_files} eligible training files; "
+                      f"{heldout_files} held-out files excluded; {planned_updates} updates per epoch. "
+                      "One same-plate, same-cell-line forward batch per training file.")
+            else:
+                print(f"Legacy sampler: up to {cfg.passes_per_cell_line} plates per training cell line. "
+                      "This run does not use all-file chemical-class rotation.")
         if cfg.model_type == "control":
             print("DMSO-only reconstruction. Head sizing sets width/bottleneck; layers/dropout are inactive.")
         cache = FileCache(cfg.file_cache)
@@ -283,7 +294,7 @@ def train(cfg=None, *, resume="", additional_epochs=None, grad_clip=None, batch_
                                    **{f"grad_{key}": v for key, v in norms.items()}})
                         bar.update()
                         bar.set_postfix({"loss": f"{value:.4f}", "t_mean_loss": f"{t_mean_loss:.4f}",
-                                         "i_mean_loss": f"{i_mean_loss:.4f}", "B": size,
+                                         "i_mean_loss": f"{i_mean_loss:.4f}",
                                          "grad": f"{grad_total:.2e}", "file": Path(unit["path"]).stem})
                     if cfg.grad_clip:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip,

@@ -1,4 +1,6 @@
 import copy
+import io
+from contextlib import redirect_stdout, redirect_stderr
 import csv
 import json
 import tempfile
@@ -80,7 +82,13 @@ class ClassRotationPipelineTests(unittest.TestCase):
             cfg=fixture.cfg(model_type="full",sampling_strategy="class_rotation",chemical_classes=str(mapping),
                             batch_size=2,accumulate_batches=False,epochs=1,val_cell_lines=1)
             with patch("models.training.checkpoints.TRAINED_ROOT",fixture.root/"runs"), patch("models.training.engine.load_chemistry",return_value=fixtures.FakeChemistry()):
-                run=train(copy.deepcopy(cfg));_,reference=load_checkpoint(run)
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    run=train(copy.deepcopy(cfg))
+                self.assertIn("sampler: class_rotation",stdout.getvalue())
+                self.assertIn("2 updates per epoch",stdout.getvalue())
+                self.assertNotIn("B=",stderr.getvalue())
+                _,reference=load_checkpoint(run)
                 interrupted=copy.deepcopy(cfg);interrupted.max_steps=1
                 partial=train(interrupted)
                 train(resume=str(partial),additional_epochs=1)

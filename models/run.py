@@ -114,7 +114,7 @@ def main():
             print(f"Invalid configuration: {exc}")
     if model_type == "full" and not Path(cfg.atom_cache).is_file():
         raise SystemExit("Chemical cache is missing. Build it first with: python models/molformer_atoms.py")
-    print(f"B={cfg.batch_size}: one forward/backward batch, then one optimizer update; no gradient accumulation.")
+    print("One forward/backward batch, then one optimizer update; no gradient accumulation.")
     train(cfg)
 
 

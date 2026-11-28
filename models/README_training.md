@@ -449,3 +449,14 @@ Existing schema 1–11 resumes retain their original sampler. Single-file and
 control-model schedules remain unchanged. `passes_per_cell_line` and
 `batches_per_unit` no longer set the new full training epoch size; the latter
 still determines the fixed validation well count. Validation inputs are unchanged.
+
+
+If a new server run reports 230 passes for 46 lines, it is using the legacy
+five-plates-per-line sampler. Updated startup output names the sampler and shows
+eligible training files, held-out files and updates per epoch. Synchronize the
+training package AND Chemcial_info/drug_cluster_labels_k8.json before restarting
+a new run. Updating files does not change a Python process already running;
+resuming its saved legacy configuration preserves the legacy schedule.
+For the current split, expect 550 training updates, not all 576 indexed files:
+held-out cell lines and ineligible files are excluded. Tqdm omits B; CSV retains
+batch_size for reproducibility.
